@@ -27,6 +27,28 @@ flutter pub add whisper_flutter_coreml
 import 'package:whisper_flutter_coreml/whisper_flutter_coreml.dart';
 ```
 
+## CoreML Hardware Acceleration
+
+**Whisper Flutter CoreML** now supports CoreML hardware acceleration on iOS 13+ and macOS 11+ devices with Apple Silicon. This enables significantly faster inference by utilizing the Apple Neural Engine (ANE).
+
+### Performance Benefits
+
+- **Up to 3x faster** transcription on Apple Silicon devices
+- **Lower power consumption** compared to CPU-only execution
+- **Optimized for Apple Neural Engine** on supported devices
+
+### Requirements for CoreML
+
+- iOS 13.0+ or macOS 11.0+
+- Apple Silicon device (M1, M2, M3, or newer recommended)
+- CoreML model files (`.mlmodelc` format)
+
+### CoreML Model Generation
+
+To use CoreML acceleration, you'll need to generate CoreML models from your Whisper models. The models will automatically fallback to CPU execution if CoreML models are not available.
+
+> **Note**: CoreML model generation requires a separate setup process. The first run with CoreML may be slower as the Apple Neural Engine compiles the model for your specific device.
+
 ## Quickstart
 
 ```dart
