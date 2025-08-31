@@ -408,69 +408,91 @@ int whisper_coreml_encode(
             return -1;
         }
         
-        // Dynamic output buffer size calculation based on actual model output
-        NSInteger outputNState = 512; // Default whisper base model
-        NSInteger outputNCtx = 1500;  // Default context length
+        // CRITICAL: Whisper.cpp expects fixed buffer size regardless of model output size
+        // The 'out' buffer is pre-allocated by whisper.cpp for standard dimensions
+        const NSInteger whisperNState = 512;  // Standard whisper encoder output size
+        const NSInteger whisperNCtx = 1500;   // Standard whisper context length
+        const size_t whisperBufferSize = whisperNState * whisperNCtx * sizeof(float); // 3MB
         
-        // Extract dimensions from actual output shape
+        // Extract actual model dimensions
+        NSInteger modelNState = 512;
+        NSInteger modelNCtx = 1500;
+        
         if (outputShape.count >= 4) {
             // Format: [batch, n_state, height, n_ctx] -> [1, 1280, 1, 1500]
-            outputNState = outputShape[1].integerValue;
-            outputNCtx = outputShape[3].integerValue;
+            modelNState = outputShape[1].integerValue;
+            modelNCtx = outputShape[3].integerValue;
         } else if (outputShape.count >= 2) {
             // Format: [n_state, n_ctx] -> [1280, 1500]
-            outputNState = outputShape[0].integerValue;
-            outputNCtx = outputShape[1].integerValue;
+            modelNState = outputShape[0].integerValue;
+            modelNCtx = outputShape[1].integerValue;
         }
         
-        const size_t expectedOutputSize = outputNState * outputNCtx * sizeof(float);
-        NSLog(@"[CoreML] Dynamic buffer sizing: n_state=%ld, n_ctx=%ld, buffer_size=%zu bytes", 
-              (long)outputNState, (long)outputNCtx, expectedOutputSize);
+        NSLog(@"[CoreML] Buffer compatibility: whisper expects [%ld×%ld]=%.2fMB, model outputs [%ld×%ld]=%.2fMB", 
+              (long)whisperNState, (long)whisperNCtx, whisperBufferSize / (1024.0*1024.0),
+              (long)modelNState, (long)modelNCtx, (modelNState * modelNCtx * sizeof(float)) / (1024.0*1024.0));
         
-        // Initialize output buffer with correct size
-        memset(out, 0, expectedOutputSize);
+        // Check if model output is compatible with whisper buffer
+        if (modelNState > whisperNState || modelNCtx > whisperNCtx) {
+            NSLog(@"[CoreML] Model output size exceeds whisper buffer capacity - using CPU fallback");
+            return -1;
+        }
+        
+        // Initialize whisper buffer (always use whisper's expected size)
+        memset(out, 0, whisperBufferSize);
         
         // Safe data copying with memory protection
         @autoreleasepool {
             @try {
-                // Reshape 4D output [1, n_state, 1, n_ctx] to 2D [n_state, n_ctx] format expected by whisper.cpp
+                // Smart tensor reshaping with size adaptation
                 if (outputShape.count >= 4) {
-                    // Reshape from [1, 1280, 1, 1500] to [1280, 1500]
-                    NSLog(@"[CoreML] Reshaping 4D output to 2D: [%ld,%ld,%ld,%ld] -> [%ld,%ld]",
+                    NSLog(@"[CoreML] Reshaping 4D model output [%ld,%ld,%ld,%ld] to whisper 2D format [%ld×%ld]",
                           (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
                           (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
-                          (long)outputNState, (long)outputNCtx);
+                          (long)whisperNState, (long)whisperNCtx);
                           
-                    // Safe copy with bounds checking for every access
                     float *outPtr = (float *)out;
                     NSInteger copiedElements = 0;
                     
-                    for (NSInteger ctx = 0; ctx < outputNCtx; ctx++) {
-                        for (NSInteger state = 0; state < outputNState; state++) {
-                            // Source index: batch=0, state, height=0, ctx  
-                            NSInteger srcIdx = ctx * outputNState + state;
-                            // Destination index: [state, ctx] layout for whisper.cpp
-                            NSInteger dstIdx = state * outputNCtx + ctx;
+                    // Adaptive copying: fit model output into whisper buffer dimensions
+                    NSInteger copyNState = MIN(modelNState, whisperNState);
+                    NSInteger copyNCtx = MIN(modelNCtx, whisperNCtx);
+                    
+                    NSLog(@"[CoreML] Copying [%ld×%ld] subset of model output to whisper buffer", 
+                          (long)copyNState, (long)copyNCtx);
+                    
+                    for (NSInteger ctx = 0; ctx < copyNCtx; ctx++) {
+                        for (NSInteger state = 0; state < copyNState; state++) {
+                            // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
+                            // Flattened index for [1, modelNState, 1, modelNCtx]
+                            NSInteger srcIdx = state * modelNCtx + ctx; // [state, ctx] in flattened 4D
                             
-                            // Triple bounds checking for maximum safety
+                            // Whisper 2D layout: [state, ctx]
+                            NSInteger dstIdx = state * whisperNCtx + ctx;
+                            
+                            // Comprehensive bounds checking
                             if (srcIdx >= 0 && srcIdx < outputElements && 
-                                dstIdx >= 0 && dstIdx < outputNState * outputNCtx &&
-                                outputData != NULL && outPtr != NULL) {
+                                dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx &&
+                                outputData != NULL && outPtr != NULL &&
+                                state < modelNState && ctx < modelNCtx) {
                                 
                                 outPtr[dstIdx] = outputData[srcIdx];
                                 copiedElements++;
-                            } else {
-                                NSLog(@"[CoreML] Skipping invalid indices: src=%ld, dst=%ld", (long)srcIdx, (long)dstIdx);
                             }
                         }
                     }
                     
-                    NSLog(@"[CoreML] 4D->2D reshape completed: copied %ld/%ld elements", 
-                          (long)copiedElements, (long)(outputNState * outputNCtx));
+                    NSLog(@"[CoreML] 4D->2D adaptive reshape completed: copied %ld elements to [%ld×%ld] whisper buffer", 
+                          (long)copiedElements, (long)whisperNState, (long)whisperNCtx);
                           
                 } else {
-                    // Direct copy for 2D output with bounds checking
-                    size_t copySize = MIN(outputSize, expectedOutputSize);
+                    // Direct copy for 2D output with size adaptation
+                    const size_t modelOutputSize = modelNState * modelNCtx * sizeof(float);
+                    const size_t copySize = MIN(modelOutputSize, whisperBufferSize);
+                    
+                    NSLog(@"[CoreML] Direct 2D copy: model %.2fMB -> whisper buffer %.2fMB (copying %.2fMB)", 
+                          modelOutputSize / (1024.0*1024.0), whisperBufferSize / (1024.0*1024.0), copySize / (1024.0*1024.0));
+                    
                     if (outputData && out && copySize > 0) {
                         memcpy(out, outputData, copySize);
                         NSLog(@"[CoreML] Direct copy completed: %zu bytes", copySize);
