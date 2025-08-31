@@ -1827,10 +1827,27 @@ static bool whisper_encode_internal(
 
         cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, coreml_n_state, n_ctx);
 
+        // CRITICAL: Validate that buffer allocation succeeded
+        if (!cur || !cur->data || ggml_nbytes(cur) != coreml_n_state * n_ctx * sizeof(float)) {
+            log("%s: Failed to allocate CoreML encoder output buffer [%d×%d] - falling back to CPU\n", 
+                __func__, coreml_n_state, n_ctx);
+            
+            // Disable CoreML and retry with CPU
+            if (wstate.ctx_coreml) {
+                wstate.ctx_coreml = nullptr;
+            }
+            ggml_free(ctx0);
+            return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
+        }
+
         // Initialize output buffer to prevent NaN values
         memset(cur->data, 0, ggml_nbytes(cur));
         
-        if (whisper_coreml_encode(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data) != 0) {
+        // Log successful buffer allocation for debugging
+        log("%s: Successfully allocated CoreML encoder buffer [%d×%d] = %.2fMB\n", 
+            __func__, coreml_n_state, n_ctx, ggml_nbytes(cur) / (1024.0*1024.0));
+        
+        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx) != 0) {
             log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
             
             // Clean up CoreML context and ensure safe fallback

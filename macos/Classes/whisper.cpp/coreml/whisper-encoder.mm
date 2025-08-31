@@ -143,6 +143,21 @@ int whisper_coreml_encode(
     float                         * mel,
     float                         * out) {
     
+    // Legacy wrapper - auto-detect dimensions and call new implementation
+    int n_state = whisper_coreml_get_n_state(ctx);
+    if (n_state <= 0) {
+        n_state = 512; // Default to base model
+    }
+    return whisper_coreml_encode_with_dims(ctx, mel, out, n_state, 1500);
+}
+
+int whisper_coreml_encode_with_dims(
+    struct whisper_coreml_context * ctx,
+    float                         * mel,
+    float                         * out,
+    int                             out_n_state,
+    int                             out_n_ctx) {
+    
     // CRITICAL: Always validate inputs first
     if (!ctx) {
         NSLog(@"[CoreML] No CoreML context - using CPU fallback");
@@ -415,11 +430,13 @@ int whisper_coreml_encode(
             return -1;
         }
         
-        // CRITICAL: Whisper.cpp expects fixed buffer size regardless of model output size
-        // The 'out' buffer is pre-allocated by whisper.cpp for standard dimensions
-        // FIXED: Support both 512 (base) and 1280 (large) model dimensions
-        NSInteger whisperNState = 512;  // Default for base model
-        const NSInteger whisperNCtx = 1500;   // Standard whisper context length
+        // CRITICAL: Use the actual allocated buffer dimensions instead of hardcoded values
+        // The 'out' buffer dimensions are now passed from whisper.cpp
+        const NSInteger whisperNState = out_n_state;   // Actual allocated buffer state dimension
+        const NSInteger whisperNCtx = out_n_ctx;       // Actual allocated buffer context dimension
+        
+        NSLog(@"[CoreML] Using actual buffer dimensions: [%ld×%ld] (passed from whisper.cpp)", 
+              (long)whisperNState, (long)whisperNCtx);
         
         // Extract actual model dimensions to determine expected buffer size
         NSInteger modelNState = 512;
@@ -433,18 +450,6 @@ int whisper_coreml_encode(
             // Format: [n_state, n_ctx] -> [1280, 1500]
             modelNState = outputShape[0].integerValue;
             modelNCtx = outputShape[1].integerValue;
-        }
-        
-        // Adapt whisper buffer size to match model dimensions
-        if (modelNState == 1280) {
-            whisperNState = 1280;  // Large model
-            NSLog(@"[CoreML] Detected large model - using 1280 dimensions");
-        } else if (modelNState == 512) {
-            whisperNState = 512;   // Base model  
-            NSLog(@"[CoreML] Detected base model - using 512 dimensions");
-        } else {
-            NSLog(@"[CoreML] ⚠️ Unexpected model dimension %ld - defaulting to base model (512)", (long)modelNState);
-            whisperNState = 512;
         }
         
         const size_t whisperBufferSize = whisperNState * whisperNCtx * sizeof(float);
@@ -483,9 +488,36 @@ int whisper_coreml_encode(
                     float *outPtr = (float *)out;
                     NSInteger copiedElements = 0;
                     
+                    // CRITICAL: Validate buffer and dimensions before starting copy
+                    if (!outPtr) {
+                        NSLog(@"[CoreML] FATAL: Output buffer pointer is NULL");
+                        return -1;
+                    }
+                    
+                    if (whisperNState <= 0 || whisperNCtx <= 0) {
+                        NSLog(@"[CoreML] FATAL: Invalid whisper buffer dimensions [%ld×%ld]", (long)whisperNState, (long)whisperNCtx);
+                        return -1;
+                    }
+                    
+                    if (modelNState <= 0 || modelNCtx <= 0) {
+                        NSLog(@"[CoreML] FATAL: Invalid model dimensions [%ld×%ld]", (long)modelNState, (long)modelNCtx);
+                        return -1;
+                    }
+                    
+                    // Validate buffer size expectations
+                    NSInteger expectedBufferElements = whisperNState * whisperNCtx;
+                    NSLog(@"[CoreML] Buffer validation: expected=%ld elements, available=%ld elements", 
+                          (long)expectedBufferElements, (long)outputElements);
+                    
                     // Adaptive copying: fit model output into whisper buffer dimensions
                     NSInteger copyNState = MIN(modelNState, whisperNState);
                     NSInteger copyNCtx = MIN(modelNCtx, whisperNCtx);
+                    
+                    // Validate copy dimensions
+                    if (copyNState <= 0 || copyNCtx <= 0) {
+                        NSLog(@"[CoreML] FATAL: Invalid copy dimensions [%ld×%ld]", (long)copyNState, (long)copyNCtx);
+                        return -1;
+                    }
                     
                     NSLog(@"[CoreML] Copying [%ld×%ld] subset of model output to whisper buffer", 
                           (long)copyNState, (long)copyNCtx);
@@ -510,14 +542,43 @@ int whisper_coreml_encode(
                                 // Whisper 2D layout: [state, ctx]
                                 NSInteger dstIdx = state * whisperNCtx + ctx;
                                 
-                                // Comprehensive bounds checking
-                                if (srcIdx >= 0 && srcIdx < outputElements && 
-                                    dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx &&
-                                    outputData != NULL && outPtr != NULL &&
-                                    state < modelNState && ctx < modelNCtx) {
+                                // CRITICAL: Comprehensive bounds checking with detailed validation
+                                bool isValidSrc = (srcIdx >= 0 && srcIdx < outputElements);
+                                bool isValidDst = (dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx);
+                                bool isValidPointers = (outputData != NULL && outPtr != NULL);
+                                bool isValidDims = (state < modelNState && ctx < modelNCtx && 
+                                                   state < whisperNState && ctx < whisperNCtx);
+                                
+                                if (isValidSrc && isValidDst && isValidPointers && isValidDims) {
+                                    // Additional safety check: verify the actual memory access won't go out of bounds
+                                    if (srcIdx < outputElements && dstIdx < (whisperNState * whisperNCtx)) {
+                                        outPtr[dstIdx] = outputData[srcIdx];
+                                        copiedElements++;
+                                    } else {
+                                        NSLog(@\"[CoreML] ERROR: Index validation failed at final check - srcIdx=%ld/%ld, dstIdx=%ld/%ld\", 
+                                              (long)srcIdx, (long)outputElements, (long)dstIdx, (long)(whisperNState * whisperNCtx));
+                                    }
+                                } else {
+                                    // Log detailed failure reason for debugging
+                                    if (!isValidSrc) {
+                                        NSLog(@\"[CoreML] ERROR: Invalid source index - srcIdx=%ld, outputElements=%ld\", 
+                                              (long)srcIdx, (long)outputElements);
+                                    }
+                                    if (!isValidDst) {
+                                        NSLog(@\"[CoreML] ERROR: Invalid destination index - dstIdx=%ld, bufferSize=%ld\", 
+                                              (long)dstIdx, (long)(whisperNState * whisperNCtx));
+                                    }
+                                    if (!isValidPointers) {
+                                        NSLog(@\"[CoreML] ERROR: Invalid pointers - outputData=%p, outPtr=%p\", outputData, outPtr);
+                                    }
+                                    if (!isValidDims) {
+                                        NSLog(@\"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld\", 
+                                              (long)state, (long)MIN(modelNState, whisperNState), (long)ctx, (long)MIN(modelNCtx, whisperNCtx));
+                                    }
                                     
-                                    outPtr[dstIdx] = outputData[srcIdx];
-                                    copiedElements++;
+                                    // Stop processing on first error to prevent crash
+                                    NSLog(@\"[CoreML] Stopping tensor copy due to bounds violation - copied %ld elements so far\", (long)copiedElements);
+                                    return -1;
                                 }
                             }
                         }
