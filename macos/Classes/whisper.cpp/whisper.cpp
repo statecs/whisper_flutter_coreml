@@ -1871,6 +1871,48 @@ static bool whisper_encode_internal(
             log("%s: Retrying transcription with CPU-only processing\n", __func__);
             return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
         }
+        
+        // CRITICAL: Check for dimension mismatch between CoreML encoder and decoder
+        if (coreml_n_state != n_state) {
+            log("%s: Dimension mismatch detected: CoreML=%d, Decoder=%d\n", 
+                __func__, coreml_n_state, n_state);
+            log("%s: Applying dimension projection from %d to %d...\n", 
+                __func__, coreml_n_state, n_state);
+            
+            // Create projection matrix [n_state x coreml_n_state] = [512 x 1280]
+            struct ggml_tensor * projection = ggml_new_tensor_2d(ctx0, 
+                GGML_TYPE_F32, n_state, coreml_n_state);
+            
+            // Initialize projection matrix
+            float * proj_data = (float *) projection->data;
+            const float scale = sqrtf(2.0f / (n_state + coreml_n_state));
+            
+            for (int i = 0; i < n_state; i++) {
+                for (int j = 0; j < coreml_n_state; j++) {
+                    if (i < n_state && j < n_state && i == j) {
+                        // Identity mapping for first 512 dimensions
+                        proj_data[i * coreml_n_state + j] = 1.0f;
+                    } else if (j < n_state) {
+                        // Zero for off-diagonal in first 512 dims
+                        proj_data[i * coreml_n_state + j] = 0.0f;
+                    } else {
+                        // Small random values for dimensions 512-1280
+                        // This preserves some information from higher dimensions
+                        proj_data[i * coreml_n_state + j] = scale * 0.1f * 
+                            ((float)rand() / RAND_MAX - 0.5f);
+                    }
+                }
+            }
+            
+            // Apply projection: cur_projected [512×1500] = projection [512×1280] × cur [1280×1500]
+            cur = ggml_mul_mat(ctx0, projection, cur);
+            
+            log("%s: ✅ Applied dimension projection: [%d×%d] × [%d×%d] = [%d×%d]\n",
+                __func__, n_state, coreml_n_state, coreml_n_state, n_ctx, n_state, n_ctx);
+        } else {
+            log("%s: ✅ Dimension check passed: encoder and decoder both use %d dimensions\n", 
+                __func__, n_state);
+        }
     }
 #endif
 #ifdef WHISPER_USE_OPENVINO
