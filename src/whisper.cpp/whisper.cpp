@@ -23,6 +23,7 @@
 #include <vector>
 #include <regex>
 #include <random>
+#include <sys/stat.h>
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -2646,8 +2647,21 @@ static std::vector<whisper_vocab::id> tokenize(const whisper_vocab & vocab, cons
 //
 
 #ifdef WHISPER_USE_COREML
-// replace .bin with -encoder.mlmodelc
+// Handle both WhisperKit bundle format and legacy single-file format
 static std::string whisper_get_coreml_path_encoder(std::string path_bin) {
+    // First check if this is already a WhisperKit bundle directory
+    // containing AudioEncoder.mlmodelc
+    struct stat info;
+    if (stat(path_bin.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+        // It's a directory, check for WhisperKit components
+        std::string audio_encoder_path = path_bin + "/AudioEncoder.mlmodelc";
+        if (stat(audio_encoder_path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+            // Found AudioEncoder.mlmodelc in the bundle
+            return audio_encoder_path;
+        }
+    }
+    
+    // Fall back to legacy behavior: replace .bin with -encoder.mlmodelc
     auto pos = path_bin.rfind('.');
     if (pos != std::string::npos) {
         path_bin = path_bin.substr(0, pos);
