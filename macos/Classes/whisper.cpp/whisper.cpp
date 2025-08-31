@@ -1923,6 +1923,15 @@ static bool whisper_encode_internal(
             // GGML performs: result[n_state×n_ctx] = projection[coreml_n_state×n_state] × cur[coreml_n_state×n_ctx]
             cur = ggml_mul_mat(ctx0, projection, cur);
             
+            // CRITICAL: Actually compute the projection multiplication
+            // Without this, the multiplication is only set up but never executed
+            {
+                struct ggml_cgraph gf_proj = {};
+                gf_proj.n_threads = n_threads;
+                ggml_build_forward_expand(&gf_proj, cur);
+                ggml_graph_compute(ctx0, &gf_proj);
+            }
+            
             log("%s: ✅ Applied dimension projection: [%d×%d] × [%d×%d] = [%d×%d]\n",
                 __func__, coreml_n_state, n_state, coreml_n_state, n_ctx, n_state, n_ctx);
         } else {
