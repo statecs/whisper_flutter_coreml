@@ -412,6 +412,43 @@ int whisper_coreml_encode_with_dims(
             outputElements *= dim.integerValue;
         }
         
+        // CRITICAL: Calculate actual memory layout size accounting for stride padding
+        NSInteger actualMemoryElements = outputElements;  // Default to logical size
+        if (outputStrides.count > 0 && outputShape.count > 0) {
+            // The actual memory size is stride[0] * shape[0] for the first dimension
+            // This accounts for any padding in the memory layout
+            NSInteger firstDimStride = outputStrides[0].integerValue;
+            NSInteger firstDimSize = outputShape[0].integerValue;
+            actualMemoryElements = firstDimStride * firstDimSize;
+            
+            // Detect and log padding
+            if (actualMemoryElements > outputElements) {
+                NSInteger paddingElements = actualMemoryElements - outputElements;
+                NSLog(@"[CoreML] ⚠️ Detected stride padding: logical=%ld elements, physical=%ld elements, padding=%ld elements", 
+                      (long)outputElements, (long)actualMemoryElements, (long)paddingElements);
+                
+                // Check individual dimension strides for padding
+                if (outputShape.count >= 4 && outputStrides.count >= 4) {
+                    NSInteger expectedStride3 = 1;
+                    NSInteger expectedStride2 = outputShape[3].integerValue;
+                    NSInteger expectedStride1 = outputShape[2].integerValue * outputShape[3].integerValue;
+                    
+                    if (outputStrides[3].integerValue != expectedStride3 ||
+                        outputStrides[2].integerValue != expectedStride2 ||
+                        outputStrides[1].integerValue != expectedStride1) {
+                        NSLog(@"[CoreML] Stride padding details:");
+                        NSLog(@"[CoreML] • Dim 3: expected=%ld, actual=%ld", 
+                              (long)expectedStride3, (long)outputStrides[3].integerValue);
+                        NSLog(@"[CoreML] • Dim 2: expected=%ld, actual=%ld", 
+                              (long)expectedStride2, (long)outputStrides[2].integerValue);
+                        NSLog(@"[CoreML] • Dim 1: expected=%ld, actual=%ld (padding=%ld)", 
+                              (long)expectedStride1, (long)outputStrides[1].integerValue,
+                              (long)(outputStrides[1].integerValue - expectedStride1));
+                    }
+                }
+            }
+        }
+        
         // Copy output data to result buffer with safe memory access
         // Expected output: [n_state, n_ctx] where n_ctx=1500, n_state varies by model
         // For base model: 512*1500=768000 elements, for small: 512*1500=768000 elements
@@ -624,9 +661,12 @@ int whisper_coreml_encode_with_dims(
                                                                 0 * outputStrides[2].integerValue +
                                                                 ctx * outputStrides[3].integerValue;
                                             
-                                            // Bounds check the calculated offset  
-                                            if (srcOffset < 0 || srcOffset >= outputElements) {
-                                                NSLog(@"[CoreML] ERROR: Calculated offset %ld out of bounds [0, %ld)", (long)srcOffset, (long)outputElements);
+                                            // Bounds check - use actualMemoryElements to account for stride padding  
+                                            if (srcOffset < 0 || srcOffset >= actualMemoryElements) {
+                                                NSLog(@"[CoreML] ERROR: Calculated offset %ld out of bounds [0, %ld) at [%ld,%ld]", 
+                                                      (long)srcOffset, (long)actualMemoryElements, (long)state, (long)ctx);
+                                                NSLog(@"[CoreML] Debug: logical elements=%ld, checking against padded memory=%ld", 
+                                                      (long)outputElements, (long)actualMemoryElements);
                                                 return -1;
                                             }
                                             
