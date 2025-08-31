@@ -579,9 +579,29 @@ int whisper_coreml_encode_with_dims(
                                     // CRITICAL: Use stride-aware memory access instead of flat array indexing
                                     @try {
                                         // Calculate proper memory addresses using strides
-                                        // For CoreML 4D tensor [batch=1, state, height=1, ctx]: use MLMultiArray indexing
-                                        NSArray<NSNumber*> *indices = @[@0, @(state), @0, @(ctx)];
-                                        float srcValue = [outputArray objectAtIndexedSubscript:indices].floatValue;
+                                        // For CoreML 4D tensor [batch=1, state, height=1, ctx]: use direct pointer access with strides
+                                        float *outputData = (float*)outputArray.dataPointer;
+                                        NSArray<NSNumber*> *outputStrides = outputArray.strides;
+                                        
+                                        // Calculate 4D index: batch=0, state, height=0, ctx
+                                        // Ensure we have enough strides for 4D access
+                                        if (outputStrides.count < 4) {
+                                            NSLog(@"[CoreML] ERROR: Insufficient strides for 4D access - got %ld strides", (long)outputStrides.count);
+                                            return -1;
+                                        }
+                                        
+                                        NSInteger srcOffset = 0 * outputStrides[0].integerValue +
+                                                            state * outputStrides[1].integerValue +
+                                                            0 * outputStrides[2].integerValue +
+                                                            ctx * outputStrides[3].integerValue;
+                                        
+                                        // Bounds check the calculated offset
+                                        if (srcOffset < 0 || srcOffset >= outputElements) {
+                                            NSLog(@"[CoreML] ERROR: Calculated offset %ld out of bounds [0, %ld)", (long)srcOffset, (long)outputElements);
+                                            return -1;
+                                        }
+                                        
+                                        float srcValue = outputData[srcOffset];
                                         
                                         // For GGML tensor: use proper stride-based access
                                         char *ggmlData = (char*)out;
