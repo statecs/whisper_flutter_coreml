@@ -1813,7 +1813,16 @@ static bool whisper_encode_internal(
 
         cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_state, n_ctx);
 
-        whisper_coreml_encode(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data);
+        // Initialize output buffer to prevent NaN values
+        memset(cur->data, 0, ggml_nbytes(cur));
+        
+        if (whisper_coreml_encode(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data) != 0) {
+            log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
+            // Disable CoreML for this state to force CPU fallback
+            wstate.ctx_coreml = nullptr;
+            ggml_free(ctx0);
+            return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
+        }
     }
 #endif
 #ifdef WHISPER_USE_OPENVINO

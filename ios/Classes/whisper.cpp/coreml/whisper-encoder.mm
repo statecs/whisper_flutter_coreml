@@ -150,13 +150,34 @@ int whisper_coreml_encode(
             totalElements *= dim.integerValue;
         }
         
-        // Copy mel data to MLMultiArray
-        // Note: mel is expected to be [3000, 80] = [2*n_ctx, n_mels]
-        // But CoreML model might expect different layout
-        float *inputData = (float *)inputArray.dataPointer;
-        memcpy(inputData, mel, totalElements * sizeof(float));
+        // Copy mel data to MLMultiArray with validation
+        // Note: mel is expected to be [2*n_ctx, n_mels] typically [3000, 80]
+        // Whisper.cpp typically uses n_ctx=1500, n_mels=80 -> 3000*80=240000 elements
+        NSLog(@"[CoreML] Expected input elements: %ld, model expects: %ld", 
+              (long)(3000 * 80), (long)totalElements);
         
-        NSLog(@"[CoreML] Created input array with %ld elements", (long)totalElements);
+        // Validate input size matches expectation
+        const NSInteger expectedElements = 3000 * 80; // 2*n_ctx * n_mels
+        if (totalElements != expectedElements) {
+            NSLog(@"[CoreML] Input size mismatch. Expected %ld, got %ld - using CPU fallback", 
+                  (long)expectedElements, (long)totalElements);
+            return -1;
+        }
+        
+        float *inputData = (float *)inputArray.dataPointer;
+        
+        // Copy and validate mel data for NaN/infinity
+        for (NSInteger i = 0; i < totalElements; i++) {
+            float value = mel[i];
+            if (isnan(value) || isinf(value)) {
+                NSLog(@"[CoreML] Invalid mel data at index %ld (value: %f) - using CPU fallback", 
+                      (long)i, value);
+                return -1;
+            }
+            inputData[i] = value;
+        }
+        
+        NSLog(@"[CoreML] Successfully created input array with %ld validated elements", (long)totalElements);
         
         // Create feature provider
         NSDictionary *inputFeatures = @{inputName: [MLFeatureValue featureValueWithMultiArray:inputArray]};
@@ -204,14 +225,31 @@ int whisper_coreml_encode(
         
         // Copy output data to result buffer
         // Expected output: [n_state, n_ctx] where n_ctx=1500, n_state varies by model
+        // For base model: 512*1500=768000 elements, for small: 512*1500=768000 elements
         float *outputData = (float *)outputArray.dataPointer;
         const size_t outputSize = outputElements * sizeof(float);
         
-        // Initialize output buffer to prevent crashes
-        memset(out, 0, outputSize);
-        memcpy(out, outputData, outputSize);
+        NSLog(@"[CoreML] Output validation: %ld elements, expected format [n_state, n_ctx]", (long)outputElements);
         
-        NSLog(@"[CoreML] Successfully completed prediction with %ld output elements", (long)outputElements);
+        // Validate output data for NaN/infinity before copying
+        for (NSInteger i = 0; i < outputElements; i++) {
+            float value = outputData[i];
+            if (isnan(value) || isinf(value)) {
+                NSLog(@"[CoreML] Invalid output data at index %ld (value: %f) - using CPU fallback", 
+                      (long)i, value);
+                return -1;
+            }
+        }
+        
+        // Initialize output buffer to ensure clean state
+        const size_t expectedOutputSize = 512 * 1500 * sizeof(float); // Common case
+        memset(out, 0, expectedOutputSize);
+        
+        // Copy validated output data
+        size_t copySize = (outputSize < expectedOutputSize) ? outputSize : expectedOutputSize;
+        memcpy(out, outputData, copySize);
+        
+        NSLog(@"[CoreML] Successfully completed prediction with %ld validated output elements", (long)outputElements);
         return 0; // Success
         
     } @catch (NSException *exception) {
