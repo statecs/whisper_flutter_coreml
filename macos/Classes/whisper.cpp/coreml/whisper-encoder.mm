@@ -432,10 +432,18 @@ int whisper_coreml_encode(
               (long)whisperNState, (long)whisperNCtx, whisperBufferSize / (1024.0*1024.0),
               (long)modelNState, (long)modelNCtx, (modelNState * modelNCtx * sizeof(float)) / (1024.0*1024.0));
         
-        // Check if model output is compatible with whisper buffer
+        // Adaptive processing: handle size mismatches gracefully
         if (modelNState > whisperNState || modelNCtx > whisperNCtx) {
-            NSLog(@"[CoreML] Model output size exceeds whisper buffer capacity - using CPU fallback");
-            return -1;
+            NSLog(@"[CoreML] ⚠️  Model dimensions exceed whisper buffer - will use partial output:");
+            NSLog(@"[CoreML] • n_state: using first %ld/%ld dimensions (%.1f%%)", 
+                  (long)MIN(modelNState, whisperNState), (long)modelNState, 
+                  100.0 * MIN(modelNState, whisperNState) / modelNState);
+            NSLog(@"[CoreML] • n_ctx: using first %ld/%ld frames (%.1f%%)", 
+                  (long)MIN(modelNCtx, whisperNCtx), (long)modelNCtx,
+                  100.0 * MIN(modelNCtx, whisperNCtx) / modelNCtx);
+            NSLog(@"[CoreML] CoreML acceleration enabled with partial model usage");
+        } else {
+            NSLog(@"[CoreML] ✅ Model dimensions compatible - using full model output");
         }
         
         // Initialize whisper buffer (always use whisper's expected size)
