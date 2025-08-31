@@ -1811,7 +1811,21 @@ static bool whisper_encode_internal(
     else if (use_coreml) {
         wstate.use_buf(ctx0, -1);
 
-        cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_state, n_ctx);
+        // CRITICAL FIX: Query CoreML model for actual output dimensions
+        // instead of using potentially incorrect hparams.n_audio_state
+        int coreml_n_state = n_state; // Default to model hparams
+        
+        // Get actual CoreML encoder output dimensions
+        if (wstate.ctx_coreml) {
+            int actual_n_state = whisper_coreml_get_n_state(wstate.ctx_coreml);
+            if (actual_n_state > 0) {
+                coreml_n_state = actual_n_state;
+                log("%s: CoreML encoder n_state = %d (model hparams = %d)\n", 
+                    __func__, coreml_n_state, n_state);
+            }
+        }
+
+        cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, coreml_n_state, n_ctx);
 
         // Initialize output buffer to prevent NaN values
         memset(cur->data, 0, ggml_nbytes(cur));

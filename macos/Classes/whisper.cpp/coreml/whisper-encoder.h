@@ -21,6 +21,9 @@ int whisper_coreml_encode(
     float                         * mel,
     float                         * out);
 
+// Get the encoder n_state dimension (512 for base, 1280 for large)
+int whisper_coreml_get_n_state(struct whisper_coreml_context * ctx);
+
 // Free CoreML context
 void whisper_coreml_free(struct whisper_coreml_context * ctx);
 

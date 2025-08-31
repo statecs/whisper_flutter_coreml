@@ -392,11 +392,18 @@ int whisper_coreml_encode(
                 }
             }
             
-            // Check last element
-            if (outputElements > 2) {
-                float lastValue = outputData[outputElements - 1];
-                if (isnan(lastValue) || isinf(lastValue)) {
-                    NSLog(@"[CoreML] Last output element is invalid (%f) - using CPU fallback", lastValue);
+            // Check last element with bounds safety
+            if (outputElements > 2 && outputData != NULL) {
+                // Add extra bounds checking to prevent crashes
+                NSInteger lastIdx = outputElements - 1;
+                if (lastIdx >= 0 && lastIdx < outputElements) {
+                    float lastValue = outputData[lastIdx];
+                    if (isnan(lastValue) || isinf(lastValue)) {
+                        NSLog(@"[CoreML] Last output element is invalid (%f) - using CPU fallback", lastValue);
+                        return -1;
+                    }
+                } else {
+                    NSLog(@"[CoreML] Invalid last element index %ld/%ld - using CPU fallback", (long)lastIdx, (long)outputElements);
                     return -1;
                 }
             }
@@ -410,11 +417,11 @@ int whisper_coreml_encode(
         
         // CRITICAL: Whisper.cpp expects fixed buffer size regardless of model output size
         // The 'out' buffer is pre-allocated by whisper.cpp for standard dimensions
-        const NSInteger whisperNState = 512;  // Standard whisper encoder output size
+        // FIXED: Support both 512 (base) and 1280 (large) model dimensions
+        NSInteger whisperNState = 512;  // Default for base model
         const NSInteger whisperNCtx = 1500;   // Standard whisper context length
-        const size_t whisperBufferSize = whisperNState * whisperNCtx * sizeof(float); // 3MB
         
-        // Extract actual model dimensions
+        // Extract actual model dimensions to determine expected buffer size
         NSInteger modelNState = 512;
         NSInteger modelNCtx = 1500;
         
@@ -427,6 +434,20 @@ int whisper_coreml_encode(
             modelNState = outputShape[0].integerValue;
             modelNCtx = outputShape[1].integerValue;
         }
+        
+        // Adapt whisper buffer size to match model dimensions
+        if (modelNState == 1280) {
+            whisperNState = 1280;  // Large model
+            NSLog(@"[CoreML] Detected large model - using 1280 dimensions");
+        } else if (modelNState == 512) {
+            whisperNState = 512;   // Base model  
+            NSLog(@"[CoreML] Detected base model - using 512 dimensions");
+        } else {
+            NSLog(@"[CoreML] ⚠️ Unexpected model dimension %ld - defaulting to base model (512)", (long)modelNState);
+            whisperNState = 512;
+        }
+        
+        const size_t whisperBufferSize = whisperNState * whisperNCtx * sizeof(float);
         
         NSLog(@"[CoreML] Buffer compatibility: whisper expects [%ld×%ld]=%.2fMB, model outputs [%ld×%ld]=%.2fMB", 
               (long)whisperNState, (long)whisperNCtx, whisperBufferSize / (1024.0*1024.0),
@@ -469,24 +490,44 @@ int whisper_coreml_encode(
                     NSLog(@"[CoreML] Copying [%ld×%ld] subset of model output to whisper buffer", 
                           (long)copyNState, (long)copyNCtx);
                     
-                    for (NSInteger ctx = 0; ctx < copyNCtx; ctx++) {
-                        for (NSInteger state = 0; state < copyNState; state++) {
-                            // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
-                            // Flattened index for [1, modelNState, 1, modelNCtx]
-                            NSInteger srcIdx = state * modelNCtx + ctx; // [state, ctx] in flattened 4D
-                            
-                            // Whisper 2D layout: [state, ctx]
-                            NSInteger dstIdx = state * whisperNCtx + ctx;
-                            
-                            // Comprehensive bounds checking
-                            if (srcIdx >= 0 && srcIdx < outputElements && 
-                                dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx &&
-                                outputData != NULL && outPtr != NULL &&
-                                state < modelNState && ctx < modelNCtx) {
+                    // Process in chunks to prevent memory pressure and timeouts
+                    const NSInteger chunkSize = 100; // Process 100 context frames at a time
+                    NSInteger processedCtx = 0;
+                    
+                    while (processedCtx < copyNCtx) {
+                        NSInteger currentChunkSize = MIN(chunkSize, copyNCtx - processedCtx);
+                        NSInteger chunkEnd = processedCtx + currentChunkSize;
+                        
+                        for (NSInteger ctx = processedCtx; ctx < chunkEnd; ctx++) {
+                            for (NSInteger state = 0; state < copyNState; state++) {
+                                // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
+                                // Correct flattened index for [1, modelNState, 1, modelNCtx]
+                                // 4D index: batch=0, state, height=0, ctx
+                                NSInteger srcIdx = (0 * modelNState * 1 * modelNCtx) + 
+                                                 (state * 1 * modelNCtx) + 
+                                                 (0 * modelNCtx) + ctx;
                                 
-                                outPtr[dstIdx] = outputData[srcIdx];
-                                copiedElements++;
+                                // Whisper 2D layout: [state, ctx]
+                                NSInteger dstIdx = state * whisperNCtx + ctx;
+                                
+                                // Comprehensive bounds checking
+                                if (srcIdx >= 0 && srcIdx < outputElements && 
+                                    dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx &&
+                                    outputData != NULL && outPtr != NULL &&
+                                    state < modelNState && ctx < modelNCtx) {
+                                    
+                                    outPtr[dstIdx] = outputData[srcIdx];
+                                    copiedElements++;
+                                }
                             }
+                        }
+                        
+                        processedCtx = chunkEnd;
+                        
+                        // Log progress for large tensors to show we're not frozen
+                        if (copyNCtx > 500 && processedCtx % 500 == 0) {
+                            NSLog(@"[CoreML] Tensor copying progress: %ld/%ld frames (%.1f%%)", 
+                                  (long)processedCtx, (long)copyNCtx, 100.0 * processedCtx / copyNCtx);
                         }
                     }
                     
@@ -523,18 +564,59 @@ int whisper_coreml_encode(
         NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exception.reason);
         
         // SAFETY: Ensure output buffer is safe even on exception
-        const size_t typical_encoder_output_size = 1500 * 512 * sizeof(float);
-        memset(out, 0, typical_encoder_output_size);
+        // Use conservative buffer size that works for both base (512) and large (1280)
+        const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
+        memset(out, 0, conservative_encoder_output_size);
         
         return -1; // CPU fallback
     } @catch (...) {
         NSLog(@"[CoreML] Unknown exception during prediction - using CPU fallback");
         
         // SAFETY: Handle any other exception type
-        const size_t typical_encoder_output_size = 1500 * 512 * sizeof(float);
-        memset(out, 0, typical_encoder_output_size);
+        // Use conservative buffer size that works for both base (512) and large (1280)
+        const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
+        memset(out, 0, conservative_encoder_output_size);
         
         return -1; // CPU fallback
+    }
+}
+
+int whisper_coreml_get_n_state(struct whisper_coreml_context * ctx) {
+    if (!ctx || !ctx->model) {
+        return -1; // Invalid context
+    }
+    
+    @try {
+        MLModelDescription* description = ctx->model.modelDescription;
+        NSDictionary<NSString*, MLFeatureDescription*>* outputFeatures = description.outputDescriptionsByName;
+        
+        // Find the encoder output feature (usually named "encoder_output_embeds" or similar)
+        for (NSString* outputName in outputFeatures) {
+            MLFeatureDescription* outputDesc = outputFeatures[outputName];
+            if (outputDesc.type == MLFeatureTypeMultiArray) {
+                NSArray<NSNumber*>* shape = outputDesc.multiArrayConstraint.shape;
+                
+                // CoreML output typically: [batch=1, n_state, height=1, n_ctx]
+                if (shape.count >= 4 && shape[1].integerValue > 0) {
+                    int n_state = (int)shape[1].integerValue;
+                    NSLog(@"[CoreML] Detected encoder n_state = %d from model output shape", n_state);
+                    return n_state;
+                }
+                // Fallback for 2D: [n_state, n_ctx]
+                else if (shape.count >= 2 && shape[0].integerValue > 0) {
+                    int n_state = (int)shape[0].integerValue;
+                    NSLog(@"[CoreML] Detected encoder n_state = %d from 2D model output shape", n_state);
+                    return n_state;
+                }
+            }
+        }
+        
+        NSLog(@"[CoreML] Could not determine n_state from model - defaulting to -1");
+        return -1;
+        
+    } @catch (NSException *exception) {
+        NSLog(@"[CoreML] Exception getting n_state: %@", exception.reason);
+        return -1;
     }
 }
 
