@@ -357,23 +357,78 @@ int whisper_coreml_encode(
         
         NSLog(@"[CoreML] Output validation: %ld elements, expected format [n_state, n_ctx]", (long)outputElements);
         
-        // Validate output data for NaN/infinity before copying
-        for (NSInteger i = 0; i < outputElements; i++) {
+        // Optimized output validation - check only first/middle/last elements to avoid main thread blocking
+        const NSInteger sampleCount = MIN(1000, outputElements / 100); // Sample 1% up to 1000 elements
+        const NSInteger step = outputElements / sampleCount;
+        
+        NSLog(@"[CoreML] Fast validation: checking %ld sample elements (every %ld elements)", (long)sampleCount, (long)step);
+        
+        for (NSInteger sample = 0; sample < sampleCount; sample++) {
+            NSInteger i = sample * step;
+            if (i >= outputElements) break;
+            
             float value = outputData[i];
             if (isnan(value) || isinf(value)) {
-                NSLog(@"[CoreML] Invalid output data at index %ld (value: %f) - using CPU fallback", 
-                      (long)i, value);
+                NSLog(@"[CoreML] Invalid output data at sample index %ld (actual index %ld, value: %f) - using CPU fallback", 
+                      (long)sample, (long)i, value);
                 return -1;
             }
         }
         
-        // Initialize output buffer to ensure clean state
-        const size_t expectedOutputSize = 512 * 1500 * sizeof(float); // Common case
+        NSLog(@"[CoreML] Fast validation passed - output data appears valid");
+        
+        // Dynamic output buffer size calculation based on actual model output
+        NSInteger nState = 512; // Default whisper base model
+        NSInteger nCtx = 1500;  // Default context length
+        
+        // Extract dimensions from actual output shape
+        if (outputShape.count >= 4) {
+            // Format: [batch, n_state, height, n_ctx] -> [1, 1280, 1, 1500]
+            nState = outputShape[1].integerValue;
+            nCtx = outputShape[3].integerValue;
+        } else if (outputShape.count >= 2) {
+            // Format: [n_state, n_ctx] -> [1280, 1500]
+            nState = outputShape[0].integerValue;
+            nCtx = outputShape[1].integerValue;
+        }
+        
+        const size_t expectedOutputSize = nState * nCtx * sizeof(float);
+        NSLog(@"[CoreML] Dynamic buffer sizing: n_state=%ld, n_ctx=%ld, buffer_size=%zu bytes", 
+              (long)nState, (long)nCtx, expectedOutputSize);
+        
+        // Initialize output buffer with correct size
         memset(out, 0, expectedOutputSize);
         
-        // Copy validated output data
-        size_t copySize = (outputSize < expectedOutputSize) ? outputSize : expectedOutputSize;
-        memcpy(out, outputData, copySize);
+        // Reshape 4D output [1, n_state, 1, n_ctx] to 2D [n_state, n_ctx] format expected by whisper.cpp
+        if (outputShape.count >= 4) {
+            // Reshape from [1, 1280, 1, 1500] to [1280, 1500]
+            NSLog(@"[CoreML] Reshaping 4D output to 2D: [%ld,%ld,%ld,%ld] -> [%ld,%ld]",
+                  (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
+                  (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
+                  (long)nState, (long)nCtx);
+                  
+            // Copy data with proper layout - skip batch and height dimensions
+            float *outPtr = (float *)out;
+            for (NSInteger ctx = 0; ctx < nCtx; ctx++) {
+                for (NSInteger state = 0; state < nState; state++) {
+                    // Source index: batch=0, state, height=0, ctx
+                    NSInteger srcIdx = ctx * nState + state; // Flattened 4D index
+                    // Destination index: [state, ctx] layout for whisper.cpp
+                    NSInteger dstIdx = state * nCtx + ctx;
+                    
+                    if (srcIdx < outputElements && dstIdx < nState * nCtx) {
+                        outPtr[dstIdx] = outputData[srcIdx];
+                    }
+                }
+            }
+            
+            NSLog(@"[CoreML] 4D->2D reshape completed: copied %ld elements", (long)(nState * nCtx));
+        } else {
+            // Direct copy for 2D output
+            size_t copySize = MIN(outputSize, expectedOutputSize);
+            memcpy(out, outputData, copySize);
+            NSLog(@"[CoreML] Direct copy completed: %zu bytes", copySize);
+        }
         
         NSLog(@"[CoreML] Successfully completed prediction with %ld validated output elements", (long)outputElements);
         return 0; // Success
