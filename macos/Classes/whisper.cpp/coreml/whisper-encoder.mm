@@ -413,7 +413,8 @@ int whisper_coreml_encode_with_dims(
         }
         
         // CRITICAL: Calculate actual memory layout size accounting for stride padding
-        NSInteger actualMemoryElements = outputElements;  // Default to logical size
+        // Declare at outer scope so it's accessible throughout the function
+        __block NSInteger actualMemoryElements = outputElements;  // Default to logical size
         if (outputStrides.count > 0 && outputShape.count > 0) {
             // The actual memory size is stride[0] * shape[0] for the first dimension
             // This accounts for any padding in the memory layout
@@ -455,9 +456,9 @@ int whisper_coreml_encode_with_dims(
         
         NSLog(@"[CoreML] Output validation: %ld elements, expected format [n_state, n_ctx]", (long)outputElements);
         
-        // Safe memory access with proper validation
-        float *outputData = (float *)outputArray.dataPointer;
-        if (!outputData) {
+        // Safe memory access with proper validation - handle different data types
+        void *outputDataPtr = outputArray.dataPointer;
+        if (!outputDataPtr) {
             NSLog(@"[CoreML] Output data pointer is null - using CPU fallback");
             return -1;
         }
@@ -472,38 +473,61 @@ int whisper_coreml_encode_with_dims(
         const size_t outputSize = outputElements * sizeof(float);
         
         // Minimal validation approach - check only essential elements to avoid crashes
+        // CRITICAL: Handle different data types properly during validation
         @try {
+            // Helper function to get value at index based on data type
+            auto getValueAtIndex = [&](NSInteger index) -> float {
+                switch (outputArray.dataType) {
+                    case MLMultiArrayDataTypeFloat16: {
+                        __fp16 *f16Data = (__fp16*)outputDataPtr;
+                        return (float)f16Data[index];
+                    }
+                    case MLMultiArrayDataTypeFloat32: {
+                        float *f32Data = (float*)outputDataPtr;
+                        return f32Data[index];
+                    }
+                    case MLMultiArrayDataTypeDouble: {
+                        double *f64Data = (double*)outputDataPtr;
+                        return (float)f64Data[index];
+                    }
+                    default:
+                        return NAN;
+                }
+            };
+            
             // Check first element
             if (outputElements > 0) {
-                float firstValue = outputData[0];
+                float firstValue = getValueAtIndex(0);
                 if (isnan(firstValue) || isinf(firstValue)) {
                     NSLog(@"[CoreML] First output element is invalid (%f) - using CPU fallback", firstValue);
                     return -1;
                 }
+                NSLog(@"[CoreML] First element validation: value=%f (valid)", firstValue);
             }
             
             // Check middle element
             if (outputElements > 1) {
                 NSInteger midIndex = outputElements / 2;
-                float midValue = outputData[midIndex];
+                float midValue = getValueAtIndex(midIndex);
                 if (isnan(midValue) || isinf(midValue)) {
                     NSLog(@"[CoreML] Middle output element is invalid (%f) - using CPU fallback", midValue);
                     return -1;
                 }
+                NSLog(@"[CoreML] Middle element validation: index=%ld, value=%f (valid)", (long)midIndex, midValue);
             }
             
             // Check last element with bounds safety
-            if (outputElements > 2 && outputData != NULL) {
-                // Add extra bounds checking to prevent crashes
+            if (outputElements > 2) {
                 NSInteger lastIdx = outputElements - 1;
-                if (lastIdx >= 0 && lastIdx < outputElements) {
-                    float lastValue = outputData[lastIdx];
+                if (lastIdx >= 0 && lastIdx < actualMemoryElements) {  // Use actualMemoryElements for bounds
+                    float lastValue = getValueAtIndex(lastIdx);
                     if (isnan(lastValue) || isinf(lastValue)) {
                         NSLog(@"[CoreML] Last output element is invalid (%f) - using CPU fallback", lastValue);
                         return -1;
                     }
+                    NSLog(@"[CoreML] Last element validation: index=%ld, value=%f (valid)", (long)lastIdx, lastValue);
                 } else {
-                    NSLog(@"[CoreML] Invalid last element index %ld/%ld - using CPU fallback", (long)lastIdx, (long)outputElements);
+                    NSLog(@"[CoreML] Invalid last element index %ld/%ld - using CPU fallback", (long)lastIdx, (long)actualMemoryElements);
                     return -1;
                 }
             }
@@ -636,7 +660,7 @@ int whisper_coreml_encode_with_dims(
                                 // CRITICAL: Comprehensive bounds checking with detailed validation
                                 bool isValidSrc = (srcIdx >= 0 && srcIdx < outputElements);
                                 bool isValidDst = (dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx);
-                                bool isValidPointers = (outputData != NULL && outPtr != NULL);
+                                bool isValidPointers = (outputDataPtr != NULL && outPtr != NULL);
                                 bool isValidDims = (state < modelNState && ctx < modelNCtx && 
                                                    state < whisperNState && ctx < whisperNCtx);
                                 
@@ -733,7 +757,7 @@ int whisper_coreml_encode_with_dims(
                                               (long)dstIdx, (long)(whisperNState * whisperNCtx));
                                     }
                                     if (!isValidPointers) {
-                                        NSLog(@"[CoreML] ERROR: Invalid pointers - outputData=%p, outPtr=%p", outputData, outPtr);
+                                        NSLog(@"[CoreML] ERROR: Invalid pointers - outputDataPtr=%p, outPtr=%p", outputDataPtr, outPtr);
                                     }
                                     if (!isValidDims) {
                                         NSLog(@"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld", 
@@ -782,8 +806,8 @@ int whisper_coreml_encode_with_dims(
                     NSLog(@"[CoreML] Direct 2D copy: model %.2fMB -> whisper buffer %.2fMB (copying %.2fMB)", 
                           modelOutputSize / (1024.0*1024.0), whisperBufferSize / (1024.0*1024.0), copySize / (1024.0*1024.0));
                     
-                    if (outputData && out && copySize > 0) {
-                        memcpy(out, outputData, copySize);
+                    if (outputDataPtr && out && copySize > 0) {
+                        memcpy(out, outputDataPtr, copySize);
                         NSLog(@"[CoreML] Direct copy completed: %zu bytes", copySize);
                     } else {
                         NSLog(@"[CoreML] Skipping direct copy due to invalid pointers or size");
