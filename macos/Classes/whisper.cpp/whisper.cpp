@@ -1879,36 +1879,46 @@ static bool whisper_encode_internal(
             log("%s: Applying dimension projection from %d to %d...\n", 
                 __func__, coreml_n_state, n_state);
             
-            // Create projection matrix [n_state x coreml_n_state] = [512 x 1280]
+            // Create projection matrix [coreml_n_state x n_state] = [1280 x 512]
+            // Note: GGML requires first dimension to match for matrix multiplication
             struct ggml_tensor * projection = ggml_new_tensor_2d(ctx0, 
-                GGML_TYPE_F32, n_state, coreml_n_state);
+                GGML_TYPE_F32, coreml_n_state, n_state);
             
             // Initialize projection matrix
             float * proj_data = (float *) projection->data;
             const float scale = sqrtf(2.0f / (n_state + coreml_n_state));
             
-            for (int i = 0; i < n_state; i++) {
-                for (int j = 0; j < coreml_n_state; j++) {
-                    if (i < n_state && j < n_state && i == j) {
+            // Matrix is now [coreml_n_state x n_state] = [1280 x 512]
+            // proj_data[j * n_state + i] accesses element at row j, column i
+            for (int j = 0; j < coreml_n_state; j++) {
+                for (int i = 0; i < n_state; i++) {
+                    if (j < n_state && i == j) {
                         // Identity mapping for first 512 dimensions
-                        proj_data[i * coreml_n_state + j] = 1.0f;
+                        proj_data[j * n_state + i] = 1.0f;
                     } else if (j < n_state) {
                         // Zero for off-diagonal in first 512 dims
-                        proj_data[i * coreml_n_state + j] = 0.0f;
+                        proj_data[j * n_state + i] = 0.0f;
                     } else {
                         // Small random values for dimensions 512-1280
                         // This preserves some information from higher dimensions
-                        proj_data[i * coreml_n_state + j] = scale * 0.1f * 
+                        proj_data[j * n_state + i] = scale * 0.1f * 
                             ((float)rand() / RAND_MAX - 0.5f);
                     }
                 }
             }
             
-            // Apply projection: cur_projected [512×1500] = projection [512×1280] × cur [1280×1500]
+            // Validate tensor dimensions before multiplication
+            GGML_ASSERT(projection->ne[0] == cur->ne[0]); // First dimensions must match for GGML
+            GGML_ASSERT(projection->ne[0] == coreml_n_state);
+            GGML_ASSERT(projection->ne[1] == n_state);
+            GGML_ASSERT(cur->ne[1] == n_ctx);
+            
+            // Apply projection: cur_projected [n_state×n_ctx] = projection^T [coreml_n_state×n_state]^T × cur [coreml_n_state×n_ctx]
+            // GGML performs: result[n_state×n_ctx] = projection[coreml_n_state×n_state] × cur[coreml_n_state×n_ctx]
             cur = ggml_mul_mat(ctx0, projection, cur);
             
             log("%s: ✅ Applied dimension projection: [%d×%d] × [%d×%d] = [%d×%d]\n",
-                __func__, n_state, coreml_n_state, coreml_n_state, n_ctx, n_state, n_ctx);
+                __func__, coreml_n_state, n_state, coreml_n_state, n_ctx, n_state, n_ctx);
         } else {
             log("%s: ✅ Dimension check passed: encoder and decoder both use %d dimensions\n", 
                 __func__, n_state);
