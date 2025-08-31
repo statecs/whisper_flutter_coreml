@@ -1890,22 +1890,28 @@ static bool whisper_encode_internal(
             
             // Matrix is now [coreml_n_state x n_state] = [1280 x 512]
             // proj_data[j * n_state + i] accesses element at row j, column i
-            for (int j = 0; j < coreml_n_state; j++) {
-                for (int i = 0; i < n_state; i++) {
-                    if (j < n_state && i == j) {
-                        // Identity mapping for first 512 dimensions
-                        proj_data[j * n_state + i] = 1.0f;
-                    } else if (j < n_state) {
-                        // Zero for off-diagonal in first 512 dims
-                        proj_data[j * n_state + i] = 0.0f;
-                    } else {
-                        // Small random values for dimensions 512-1280
-                        // This preserves some information from higher dimensions
-                        proj_data[j * n_state + i] = scale * 0.1f * 
-                            ((float)rand() / RAND_MAX - 0.5f);
-                    }
+            
+            // Initialize entire matrix to zero first
+            memset(proj_data, 0, coreml_n_state * n_state * sizeof(float));
+            
+            // Strategy: Average every 2.5 dimensions from 1280 to get 512
+            // This preserves more information than just taking first 512
+            float ratio = (float)coreml_n_state / (float)n_state; // 1280/512 = 2.5
+            
+            for (int i = 0; i < n_state; i++) {
+                // For each output dimension, average corresponding input dimensions
+                int start_j = (int)(i * ratio);
+                int end_j = (int)((i + 1) * ratio);
+                if (end_j > coreml_n_state) end_j = coreml_n_state;
+                
+                float weight = 1.0f / (end_j - start_j);
+                for (int j = start_j; j < end_j; j++) {
+                    proj_data[j * n_state + i] = weight;
                 }
             }
+            
+            log("%s: Using averaging projection: %d dims -> %d dims (ratio %.2f)\n",
+                __func__, coreml_n_state, n_state, ratio);
             
             // Validate tensor dimensions before multiplication
             GGML_ASSERT(projection->ne[0] == cur->ne[0]); // First dimensions must match for GGML
