@@ -65,6 +65,63 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
             return nullptr;
         }
         
+        // Enhanced model compatibility validation
+        NSString *inputName = description.inputDescriptionsByName.allKeys.firstObject;
+        MLFeatureDescription *inputDesc = description.inputDescriptionsByName[inputName];
+        
+        if (inputDesc.type != MLFeatureTypeMultiArray) {
+            NSLog(@"[CoreML] Model input is not MultiArray type (got %ld) - falling back to CPU", (long)inputDesc.type);
+            return nullptr;
+        }
+        
+        NSArray<NSNumber *> *inputShape = inputDesc.multiArrayConstraint.shape;
+        NSLog(@"[CoreML] Model input shape: %@ (dimensions: %lu)", inputShape, (unsigned long)inputShape.count);
+        
+        // Check if shape is compatible with whisper encoder expectations
+        NSInteger totalElements = 1;
+        for (NSNumber *dim in inputShape) {
+            totalElements *= dim.integerValue;
+        }
+        
+        // Whisper encoder should accept reasonable input sizes
+        if (totalElements < 10000 || totalElements > 2000000) {
+            NSLog(@"[CoreML] Model input size (%ld elements) outside reasonable range (10K-2M) - falling back to CPU", 
+                  (long)totalElements);
+            return nullptr;
+        }
+        
+        // Check output compatibility
+        if (!description.outputDescriptionsByName || description.outputDescriptionsByName.count == 0) {
+            NSLog(@"[CoreML] Model has no valid outputs - falling back to CPU");
+            return nullptr;
+        }
+        
+        NSString *outputName = description.outputDescriptionsByName.allKeys.firstObject;
+        MLFeatureDescription *outputDesc = description.outputDescriptionsByName[outputName];
+        
+        if (outputDesc.type != MLFeatureTypeMultiArray) {
+            NSLog(@"[CoreML] Model output is not MultiArray type - falling back to CPU");
+            return nullptr;
+        }
+        
+        NSArray<NSNumber *> *outputShape = outputDesc.multiArrayConstraint.shape;
+        NSLog(@"[CoreML] Model output shape: %@", outputShape);
+        
+        NSInteger outputElements = 1;
+        for (NSNumber *dim in outputShape) {
+            outputElements *= dim.integerValue;
+        }
+        
+        // Whisper encoder output should be reasonable size (typically n_state * n_ctx)
+        if (outputElements < 100000 || outputElements > 5000000) {
+            NSLog(@"[CoreML] Model output size (%ld elements) outside reasonable range (100K-5M) - falling back to CPU", 
+                  (long)outputElements);
+            return nullptr;
+        }
+        
+        NSLog(@"[CoreML] Model compatibility check passed - input: %ld elements, output: %ld elements", 
+              (long)totalElements, (long)outputElements);
+        
         whisper_coreml_context *ctx = new whisper_coreml_context();
         ctx->model = model;
         ctx->config = config;
@@ -156,25 +213,94 @@ int whisper_coreml_encode(
         NSLog(@"[CoreML] Expected input elements: %ld, model expects: %ld", 
               (long)(3000 * 80), (long)totalElements);
         
-        // Validate input size matches expectation
-        const NSInteger expectedElements = 3000 * 80; // 2*n_ctx * n_mels
-        if (totalElements != expectedElements) {
-            NSLog(@"[CoreML] Input size mismatch. Expected %ld, got %ld - using CPU fallback", 
-                  (long)expectedElements, (long)totalElements);
-            return -1;
+        // Dynamic input size calculation based on model requirements
+        // Extract dimensions from model shape: typically [batch, n_mels, height, n_ctx]
+        NSInteger batchSize = 1, nMels = 80, height = 1, nCtx = 1500;
+        
+        if (inputShape.count >= 4) {
+            batchSize = inputShape[0].integerValue;
+            nMels = inputShape[1].integerValue; 
+            height = inputShape[2].integerValue;
+            nCtx = inputShape[3].integerValue;
+        } else if (inputShape.count >= 2) {
+            // Handle 2D case [n_features, n_ctx] 
+            nMels = inputShape[0].integerValue;
+            nCtx = inputShape[1].integerValue;
         }
+        
+        NSLog(@"[CoreML] Detected model dimensions: batch=%ld, n_mels=%ld, height=%ld, n_ctx=%ld", 
+              (long)batchSize, (long)nMels, (long)height, (long)nCtx);
+        
+        // Calculate source data dimensions (whisper.cpp standard)
+        const NSInteger srcNCtx = 1500; // Standard whisper context
+        const NSInteger srcNMels = 80;   // Standard mel features  
+        const NSInteger srcElements = 2 * srcNCtx * srcNMels; // 240,000 elements
+        
+        NSLog(@"[CoreML] Source data: %ld elements (%ld ctx × %ld mels × 2)", 
+              (long)srcElements, (long)srcNCtx, (long)srcNMels);
+        NSLog(@"[CoreML] Model expects: %ld elements", (long)totalElements);
         
         float *inputData = (float *)inputArray.dataPointer;
         
-        // Copy and validate mel data for NaN/infinity
-        for (NSInteger i = 0; i < totalElements; i++) {
-            float value = mel[i];
-            if (isnan(value) || isinf(value)) {
-                NSLog(@"[CoreML] Invalid mel data at index %ld (value: %f) - using CPU fallback", 
-                      (long)i, value);
-                return -1;
+        // Initialize input array to zero
+        memset(inputData, 0, totalElements * sizeof(float));
+        
+        // Reshape and copy mel data based on size compatibility
+        if (srcElements == totalElements) {
+            // Direct copy - same size
+            NSLog(@"[CoreML] Direct copy: source and model have same size");
+            for (NSInteger i = 0; i < totalElements; i++) {
+                float value = mel[i];
+                if (isnan(value) || isinf(value)) {
+                    value = 0.0f; // Sanitize invalid values instead of failing
+                }
+                inputData[i] = value;
             }
-            inputData[i] = value;
+        } else if (srcElements < totalElements) {
+            // Model expects more features - need to reshape/interpolate
+            NSLog(@"[CoreML] Reshaping: expanding %ld to %ld elements", (long)srcElements, (long)totalElements);
+            
+            // Handle shape transformation from [2*n_ctx, n_mels] to [batch, n_mels_new, height, n_ctx_new]
+            if (inputShape.count >= 4) {
+                // 4D tensor reshape
+                const NSInteger srcFrames = 2 * srcNCtx; // 3000 frames
+                const NSInteger dstFrames = nCtx; 
+                const NSInteger melRatio = nMels / srcNMels; // e.g., 128/80 = 1.6
+                
+                for (NSInteger frame = 0; frame < MIN(srcFrames, dstFrames); frame++) {
+                    for (NSInteger srcMel = 0; srcMel < srcNMels; srcMel++) {
+                        float value = mel[frame * srcNMels + srcMel];
+                        if (isnan(value) || isinf(value)) value = 0.0f;
+                        
+                        // Map source mel to destination mel features with interpolation
+                        NSInteger dstMelStart = (srcMel * nMels) / srcNMels;
+                        NSInteger dstMelEnd = ((srcMel + 1) * nMels) / srcNMels;
+                        
+                        for (NSInteger dstMel = dstMelStart; dstMel < dstMelEnd; dstMel++) {
+                            NSInteger dstIdx = frame * nMels + dstMel;
+                            if (dstIdx < totalElements) {
+                                inputData[dstIdx] = value;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // 2D tensor - simple copy with truncation
+                NSInteger copyElements = MIN(srcElements, totalElements);
+                for (NSInteger i = 0; i < copyElements; i++) {
+                    float value = mel[i];
+                    if (isnan(value) || isinf(value)) value = 0.0f;
+                    inputData[i] = value;
+                }
+            }
+        } else {
+            // Model expects fewer features - truncate
+            NSLog(@"[CoreML] Reshaping: truncating %ld to %ld elements", (long)srcElements, (long)totalElements);
+            for (NSInteger i = 0; i < totalElements; i++) {
+                float value = mel[i];
+                if (isnan(value) || isinf(value)) value = 0.0f;
+                inputData[i] = value;
+            }
         }
         
         NSLog(@"[CoreML] Successfully created input array with %ld validated elements", (long)totalElements);

@@ -1818,9 +1818,21 @@ static bool whisper_encode_internal(
         
         if (whisper_coreml_encode(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data) != 0) {
             log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
-            // Disable CoreML for this state to force CPU fallback
-            wstate.ctx_coreml = nullptr;
+            
+            // Clean up CoreML context and ensure safe fallback
+            if (wstate.ctx_coreml) {
+                // Don't free here - let normal cleanup handle it
+                // whisper_coreml_free(wstate.ctx_coreml);
+                wstate.ctx_coreml = nullptr;
+            }
+            
+            // Clear any potentially corrupted data in output buffer
+            memset(cur->data, 0, ggml_nbytes(cur));
+            
             ggml_free(ctx0);
+            
+            // Recursive call for CPU fallback with CoreML disabled
+            log("%s: Retrying transcription with CPU-only processing\n", __func__);
             return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
         }
     }
