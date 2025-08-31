@@ -359,6 +359,53 @@ int whisper_coreml_encode_with_dims(
         NSArray<NSNumber *> *outputShape = outputArray.shape;
         NSLog(@"[CoreML] Output shape: %@", outputShape);
         
+        // CRITICAL: Debug CoreML MLMultiArray memory layout and data type
+        NSArray<NSNumber *> *outputStrides = outputArray.strides;
+        NSLog(@"[CoreML] Output strides: %@ (elements)", outputStrides);
+        NSLog(@"[CoreML] CoreML data pointer: %p", outputArray.dataPointer);
+        NSLog(@"[CoreML] CoreML data type: %d", (int)outputArray.dataType);
+        NSLog(@"[CoreML] Data type reference - Float16=%d, Float32=%d, Double=%d, Int32=%d", 
+              (int)MLMultiArrayDataTypeFloat16, (int)MLMultiArrayDataTypeFloat32,
+              (int)MLMultiArrayDataTypeDouble, (int)MLMultiArrayDataTypeInt32);
+              
+        // Validate data type and prepare for conversion
+        BOOL needsConversion = NO;
+        size_t elementSize = 0;
+        NSString *dataTypeName = @"Unknown";
+        
+        switch (outputArray.dataType) {
+            case MLMultiArrayDataTypeFloat16:
+                elementSize = 2;  // 16 bits = 2 bytes
+                dataTypeName = @"Float16";
+                needsConversion = YES;  // Need to convert to Float32
+                break;
+            case MLMultiArrayDataTypeFloat32:
+                elementSize = 4;  // 32 bits = 4 bytes
+                dataTypeName = @"Float32";
+                needsConversion = NO;   // Already Float32
+                break;
+            case MLMultiArrayDataTypeDouble:
+                elementSize = 8;  // 64 bits = 8 bytes
+                dataTypeName = @"Double";
+                needsConversion = YES;  // Need to convert to Float32
+                break;
+            default:
+                NSLog(@"[CoreML] ERROR: Unsupported data type %d - using CPU fallback", (int)outputArray.dataType);
+                return -1;
+        }
+        
+        NSLog(@"[CoreML] Detected data type: %@ (%zu bytes per element), conversion needed: %@",
+              dataTypeName, elementSize, needsConversion ? @"YES" : @"NO");
+        
+        // Calculate stride information in bytes
+        if (outputStrides.count >= 2) {
+            NSInteger stride0_elements = outputStrides[0].integerValue;  // stride for dim 0
+            NSInteger stride1_elements = outputStrides[1].integerValue;  // stride for dim 1
+            NSLog(@"[CoreML] CoreML strides: [%ld, %ld] elements = [%ld, %ld] bytes", 
+                  (long)stride0_elements, (long)stride1_elements,
+                  (long)(stride0_elements * sizeof(float)), (long)(stride1_elements * sizeof(float)));
+        }
+        
         // Calculate output size
         NSInteger outputElements = 1;
         for (NSNumber *dim in outputShape) {
@@ -523,8 +570,14 @@ int whisper_coreml_encode_with_dims(
                     NSLog(@"[CoreML] Copying [%ld×%ld] subset of model output to whisper buffer", 
                           (long)copyNState, (long)copyNCtx);
                     
-                    // Process in chunks to prevent memory pressure and timeouts
-                    const NSInteger chunkSize = 100; // Process 100 context frames at a time
+                    // PERFORMANCE: Add timing and progress monitoring
+                    NSDate *copyStartTime = [NSDate date];
+                    NSInteger totalElements = copyNState * copyNCtx;
+                    NSLog(@"[CoreML] Starting tensor copy of %ld elements with %@ data type", 
+                          (long)totalElements, dataTypeName);
+                    
+                    // OPTIMIZATION: Use batch processing for better performance
+                    const NSInteger chunkSize = needsConversion ? 100 : 500; // Smaller chunks for conversions
                     NSInteger processedCtx = 0;
                     
                     while (processedCtx < copyNCtx) {
@@ -577,42 +630,78 @@ int whisper_coreml_encode_with_dims(
                                                 return -1;
                                             }
                                             
-                                            float srcValue = outputData[srcOffset];
+                                            // CRITICAL: Get source value with proper data type handling
+                                            float srcValue = 0.0f;
+                                            
+                                            // Extract value based on actual data type
+                                            void *dataPtr = outputArray.dataPointer;
+                                            switch (outputArray.dataType) {
+                                                case MLMultiArrayDataTypeFloat16: {
+                                                    // OPTIMIZED: Use Apple's highly efficient Float16 conversion
+                                                    __fp16 *f16Data = (__fp16*)dataPtr;
+                                                    __fp16 f16Value = f16Data[srcOffset];
+                                                    // Direct hardware-accelerated conversion
+                                                    srcValue = (float)f16Value;
+                                                    break;
+                                                }
+                                                case MLMultiArrayDataTypeFloat32: {
+                                                    float *f32Data = (float*)dataPtr;
+                                                    srcValue = f32Data[srcOffset];
+                                                    break;
+                                                }
+                                                case MLMultiArrayDataTypeDouble: {
+                                                    double *f64Data = (double*)dataPtr;
+                                                    srcValue = (float)f64Data[srcOffset];
+                                                    break;
+                                                }
+                                                default:
+                                                    NSLog(@"[CoreML] ERROR: Unsupported data type during value extraction");
+                                                    return -1;
+                                            }
                                             
                                             // Use GGML stride-based access for destination
                                             char *ggmlData = (char*)out;
                                             size_t ggmlOffset = ctx * sizeof(float) + state * out_stride_bytes;
                                             float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
+                                            
+                                            // Perform safe memory copy
                                             *ggmlPtr = srcValue;
+                                            copiedElements++;
+                                            
+                                            // Occasional validation for debugging (every 10000 elements)
+                                            if (copiedElements % 10000 == 0) {
+                                                NSLog(@"[CoreML] Progress: copied %ld elements, current [%ld,%ld] = %f", 
+                                                      (long)copiedElements, (long)state, (long)ctx, srcValue);
+                                            }
                                         } @catch (NSException *e) {
                                             NSLog(@"[CoreML] Stride-aware copy failed at [%ld,%ld]: %@", (long)state, (long)ctx, e.reason);
                                             return -1;
                                         }
                                         copiedElements++;
                                     } else {
-                                        NSLog(@\"[CoreML] ERROR: Index validation failed at final check - srcIdx=%ld/%ld, dstIdx=%ld/%ld\", 
+                                        NSLog(@"[CoreML] ERROR: Index validation failed at final check - srcIdx=%ld/%ld, dstIdx=%ld/%ld", 
                                               (long)srcIdx, (long)outputElements, (long)dstIdx, (long)(whisperNState * whisperNCtx));
                                     }
                                 } else {
                                     // Log detailed failure reason for debugging
                                     if (!isValidSrc) {
-                                        NSLog(@\"[CoreML] ERROR: Invalid source index - srcIdx=%ld, outputElements=%ld\", 
+                                        NSLog(@"[CoreML] ERROR: Invalid source index - srcIdx=%ld, outputElements=%ld", 
                                               (long)srcIdx, (long)outputElements);
                                     }
                                     if (!isValidDst) {
-                                        NSLog(@\"[CoreML] ERROR: Invalid destination index - dstIdx=%ld, bufferSize=%ld\", 
+                                        NSLog(@"[CoreML] ERROR: Invalid destination index - dstIdx=%ld, bufferSize=%ld", 
                                               (long)dstIdx, (long)(whisperNState * whisperNCtx));
                                     }
                                     if (!isValidPointers) {
-                                        NSLog(@\"[CoreML] ERROR: Invalid pointers - outputData=%p, outPtr=%p\", outputData, outPtr);
+                                        NSLog(@"[CoreML] ERROR: Invalid pointers - outputData=%p, outPtr=%p", outputData, outPtr);
                                     }
                                     if (!isValidDims) {
-                                        NSLog(@\"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld\", 
+                                        NSLog(@"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld", 
                                               (long)state, (long)MIN(modelNState, whisperNState), (long)ctx, (long)MIN(modelNCtx, whisperNCtx));
                                     }
                                     
                                     // Stop processing on first error to prevent crash
-                                    NSLog(@\"[CoreML] Stopping tensor copy due to bounds violation - copied %ld elements so far\", (long)copiedElements);
+                                    NSLog(@"[CoreML] Stopping tensor copy due to bounds violation - copied %ld elements so far", (long)copiedElements);
                                     return -1;
                                 }
                             }
@@ -627,8 +716,23 @@ int whisper_coreml_encode_with_dims(
                         }
                     }
                     
-                    NSLog(@"[CoreML] 4D->2D adaptive reshape completed: copied %ld elements to [%ld×%ld] whisper buffer", 
-                          (long)copiedElements, (long)whisperNState, (long)whisperNCtx);
+                    // PERFORMANCE: Calculate and report timing metrics
+                    NSTimeInterval copyDuration = [[NSDate date] timeIntervalSinceDate:copyStartTime];
+                    NSInteger totalExpectedElements = copyNState * copyNCtx;
+                    double elementsPerSecond = copiedElements / MAX(copyDuration, 0.001);
+                    double throughputMBPS = (copiedElements * sizeof(float)) / (1024.0 * 1024.0 * MAX(copyDuration, 0.001));
+                    
+                    NSLog(@"[CoreML] ✅ 4D->2D adaptive tensor copy completed successfully!");
+                    NSLog(@"[CoreML] Performance metrics:");
+                    NSLog(@"[CoreML] • Elements copied: %ld/%ld (%.1f%%)", 
+                          (long)copiedElements, (long)totalExpectedElements, 
+                          100.0 * copiedElements / MAX(totalExpectedElements, 1));
+                    NSLog(@"[CoreML] • Copy duration: %.3f seconds", copyDuration);
+                    NSLog(@"[CoreML] • Processing speed: %.1f K elements/sec", elementsPerSecond / 1000.0);
+                    NSLog(@"[CoreML] • Memory throughput: %.1f MB/s", throughputMBPS);
+                    NSLog(@"[CoreML] • Data type: %@ (%@conversion)", dataTypeName, needsConversion ? @"with " : @"no ");
+                    NSLog(@"[CoreML] • Target buffer: [%ld×%ld] with %zu-byte stride", 
+                          (long)whisperNState, (long)whisperNCtx, out_stride_bytes);
                           
                 } else {
                     // Direct copy for 2D output with size adaptation

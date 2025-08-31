@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <stddef.h>  // For size_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
