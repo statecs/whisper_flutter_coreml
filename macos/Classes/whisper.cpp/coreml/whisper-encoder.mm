@@ -148,7 +148,7 @@ int whisper_coreml_encode(
     if (n_state <= 0) {
         n_state = 512; // Default to base model
     }
-    return whisper_coreml_encode_with_dims(ctx, mel, out, n_state, 1500);
+    return whisper_coreml_encode_with_dims(ctx, mel, out, n_state, 1500, n_state * sizeof(float));
 }
 
 int whisper_coreml_encode_with_dims(
@@ -156,7 +156,8 @@ int whisper_coreml_encode_with_dims(
     float                         * mel,
     float                         * out,
     int                             out_n_state,
-    int                             out_n_ctx) {
+    int                             out_n_ctx,
+    size_t                          out_stride_bytes) {
     
     // CRITICAL: Always validate inputs first
     if (!ctx) {
@@ -552,7 +553,21 @@ int whisper_coreml_encode_with_dims(
                                 if (isValidSrc && isValidDst && isValidPointers && isValidDims) {
                                     // Additional safety check: verify the actual memory access won't go out of bounds
                                     if (srcIdx < outputElements && dstIdx < (whisperNState * whisperNCtx)) {
-                                        outPtr[dstIdx] = outputData[srcIdx];
+                                        // CRITICAL: Use stride-aware access instead of flat array
+                                        @try {
+                                            // Use MLMultiArray proper indexing for CoreML output
+                                            NSArray<NSNumber*> *indices = @[@0, @(state), @0, @(ctx)];
+                                            float srcValue = [outputArray objectAtIndexedSubscript:indices].floatValue;
+                                            
+                                            // Use GGML stride-based access for destination
+                                            char *ggmlData = (char*)out;
+                                            size_t ggmlOffset = ctx * sizeof(float) + state * out_stride_bytes;
+                                            float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
+                                            *ggmlPtr = srcValue;
+                                        } @catch (NSException *e) {
+                                            NSLog(@"[CoreML] Stride-aware copy failed at [%ld,%ld]: %@", (long)state, (long)ctx, e.reason);
+                                            return -1;
+                                        }
                                         copiedElements++;
                                     } else {
                                         NSLog(@\"[CoreML] ERROR: Index validation failed at final check - srcIdx=%ld/%ld, dstIdx=%ld/%ld\", 

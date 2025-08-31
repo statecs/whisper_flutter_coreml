@@ -1846,8 +1846,13 @@ static bool whisper_encode_internal(
         // Log successful buffer allocation for debugging
         log("%s: Successfully allocated CoreML encoder buffer [%d×%d] = %.2fMB\n", 
             __func__, coreml_n_state, n_ctx, ggml_nbytes(cur) / (1024.0*1024.0));
+            
+        // CRITICAL: Debug actual GGML tensor layout
+        log("%s: GGML tensor dimensions: ne[0]=%lld, ne[1]=%lld\n", __func__, cur->ne[0], cur->ne[1]);
+        log("%s: GGML tensor strides (bytes): nb[0]=%zu, nb[1]=%zu\n", __func__, cur->nb[0], cur->nb[1]);
+        log("%s: GGML tensor data pointer: %p, expected size: %zu bytes\n", __func__, cur->data, ggml_nbytes(cur));
         
-        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx) != 0) {
+        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx, cur->nb[1]) != 0) {
             log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
             
             // Clean up CoreML context and ensure safe fallback

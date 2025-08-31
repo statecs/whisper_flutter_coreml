@@ -1847,7 +1847,7 @@ static bool whisper_encode_internal(
         log("%s: Successfully allocated CoreML encoder buffer [%d×%d] = %.2fMB\n", 
             __func__, coreml_n_state, n_ctx, ggml_nbytes(cur) / (1024.0*1024.0));
         
-        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx) != 0) {
+        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx, cur->nb[1]) != 0) {
             log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
             // Disable CoreML for this state to force CPU fallback
             wstate.ctx_coreml = nullptr;

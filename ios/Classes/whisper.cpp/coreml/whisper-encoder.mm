@@ -148,7 +148,7 @@ int whisper_coreml_encode(
     if (n_state <= 0) {
         n_state = 512; // Default to base model
     }
-    return whisper_coreml_encode_with_dims(ctx, mel, out, n_state, 1500);
+    return whisper_coreml_encode_with_dims(ctx, mel, out, n_state, 1500, n_state * sizeof(float));
 }
 
 int whisper_coreml_encode_with_dims(
@@ -156,7 +156,8 @@ int whisper_coreml_encode_with_dims(
     float                         * mel,
     float                         * out,
     int                             out_n_state,
-    int                             out_n_ctx) {
+    int                             out_n_ctx,
+    size_t                          out_stride_bytes) {
     
     // CRITICAL: Always validate inputs first
     if (!ctx) {
@@ -358,6 +359,22 @@ int whisper_coreml_encode_with_dims(
         NSArray<NSNumber *> *outputShape = outputArray.shape;
         NSLog(@"[CoreML] Output shape: %@", outputShape);
         
+        // CRITICAL: Debug CoreML MLMultiArray memory layout
+        NSArray<NSNumber *> *outputStrides = outputArray.strides;
+        NSLog(@"[CoreML] Output strides: %@ (elements)", outputStrides);
+        NSLog(@"[CoreML] CoreML data pointer: %p", outputArray.dataPointer);
+        NSLog(@"[CoreML] CoreML data type: %d (MLMultiArrayDataTypeFloat32=%d)", 
+              (int)outputArray.dataType, (int)MLMultiArrayDataTypeFloat32);
+        
+        // Calculate stride information in bytes
+        if (outputStrides.count >= 2) {
+            NSInteger stride0_elements = outputStrides[0].integerValue;  // stride for dim 0
+            NSInteger stride1_elements = outputStrides[1].integerValue;  // stride for dim 1
+            NSLog(@"[CoreML] CoreML strides: [%ld, %ld] elements = [%ld, %ld] bytes", 
+                  (long)stride0_elements, (long)stride1_elements,
+                  (long)(stride0_elements * sizeof(float)), (long)(stride1_elements * sizeof(float)));
+        }
+        
         // Calculate output size
         NSInteger outputElements = 1;
         for (NSNumber *dim in outputShape) {
@@ -437,6 +454,15 @@ int whisper_coreml_encode_with_dims(
         
         NSLog(@"[CoreML] Using actual buffer dimensions: [%ld×%ld] (passed from whisper.cpp)", 
               (long)whisperNState, (long)whisperNCtx);
+        NSLog(@"[CoreML] GGML buffer stride: %zu bytes (%zu floats per row)", 
+              out_stride_bytes, out_stride_bytes / sizeof(float));
+              
+        // Validate stride makes sense
+        if (out_stride_bytes < whisperNState * sizeof(float)) {
+            NSLog(@"[CoreML] ERROR: Invalid stride - stride=%zu bytes < expected=%ld bytes", 
+                  out_stride_bytes, (long)(whisperNState * sizeof(float)));
+            return -1;
+        }
         
         // Extract actual model dimensions to determine expected buffer size
         NSInteger modelNState = 512;
@@ -550,13 +576,33 @@ int whisper_coreml_encode_with_dims(
                                                    state < whisperNState && ctx < whisperNCtx);
                                 
                                 if (isValidSrc && isValidDst && isValidPointers && isValidDims) {
-                                    // Additional safety check: verify the actual memory access won't go out of bounds
-                                    if (srcIdx < outputElements && dstIdx < (whisperNState * whisperNCtx)) {
-                                        outPtr[dstIdx] = outputData[srcIdx];
+                                    // CRITICAL: Use stride-aware memory access instead of flat array indexing
+                                    @try {
+                                        // Calculate proper memory addresses using strides
+                                        // For CoreML 4D tensor [batch=1, state, height=1, ctx]: use MLMultiArray indexing
+                                        NSArray<NSNumber*> *indices = @[@0, @(state), @0, @(ctx)];
+                                        float srcValue = [outputArray objectAtIndexedSubscript:indices].floatValue;
+                                        
+                                        // For GGML tensor: use proper stride-based access
+                                        char *ggmlData = (char*)out;
+                                        size_t ggmlOffset = ctx * sizeof(float) + state * out_stride_bytes;
+                                        float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
+                                        
+                                        // Perform safe memory copy
+                                        *ggmlPtr = srcValue;
                                         copiedElements++;
-                                    } else {
-                                        NSLog(@"[CoreML] ERROR: Index validation failed at final check - srcIdx=%ld/%ld, dstIdx=%ld/%ld", 
-                                              (long)srcIdx, (long)outputElements, (long)dstIdx, (long)(whisperNState * whisperNCtx));
+                                        
+                                        // Occasional validation for debugging (every 10000 elements)
+                                        if (copiedElements % 10000 == 0) {
+                                            NSLog(@"[CoreML] Progress: copied %ld elements, current [%ld,%ld] = %f", 
+                                                  (long)copiedElements, (long)state, (long)ctx, srcValue);
+                                        }
+                                        
+                                    } @catch (NSException *e) {
+                                        NSLog(@"[CoreML] Exception during stride-aware copy at [%ld,%ld]: %@", 
+                                              (long)state, (long)ctx, e.reason);
+                                        NSLog(@"[CoreML] Stopping tensor copy to prevent crash - copied %ld elements", (long)copiedElements);
+                                        return -1;
                                     }
                                 } else {
                                     // Log detailed failure reason for debugging
