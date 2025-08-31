@@ -27,7 +27,7 @@ A Flutter FFI plugin for Whisper.cpp.
   # Flutter.framework does not contain a i386 slice.
   s.xcconfig = {
       'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
-      'GCC_PREPROCESSOR_DEFINITIONS' => 'WHISPER_USE_COREML=1',
+      'GCC_PREPROCESSOR_DEFINITIONS' => 'WHISPER_USE_COREML=1 NDEBUG=1',
       'CLANG_ENABLE_OBJC_ARC' => 'YES',
   }
   s.library = 'c++'
