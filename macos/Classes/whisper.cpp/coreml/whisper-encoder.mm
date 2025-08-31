@@ -724,8 +724,10 @@ int whisper_coreml_encode_with_dims(
                                             }
                                             
                                             // Use GGML stride-based access for destination
+                                            // CRITICAL FIX: GGML tensor layout is [state, ctx] not [ctx, state]
+                                            // nb[0] = 4 bytes (stride between states), nb[1] = out_stride_bytes (stride between contexts)
                                             char *ggmlData = (char*)out;
-                                            size_t ggmlOffset = ctx * sizeof(float) + state * out_stride_bytes;
+                                            size_t ggmlOffset = state * sizeof(float) + ctx * out_stride_bytes;
                                             float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
                                             
                                             // Perform safe memory copy
