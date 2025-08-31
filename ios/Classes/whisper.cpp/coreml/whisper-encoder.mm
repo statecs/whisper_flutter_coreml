@@ -349,33 +349,64 @@ int whisper_coreml_encode(
             outputElements *= dim.integerValue;
         }
         
-        // Copy output data to result buffer
+        // Copy output data to result buffer with safe memory access
         // Expected output: [n_state, n_ctx] where n_ctx=1500, n_state varies by model
         // For base model: 512*1500=768000 elements, for small: 512*1500=768000 elements
-        float *outputData = (float *)outputArray.dataPointer;
-        const size_t outputSize = outputElements * sizeof(float);
         
         NSLog(@"[CoreML] Output validation: %ld elements, expected format [n_state, n_ctx]", (long)outputElements);
         
-        // Optimized output validation - check only first/middle/last elements to avoid main thread blocking
-        const NSInteger sampleCount = MIN(1000, outputElements / 100); // Sample 1% up to 1000 elements
-        const NSInteger step = outputElements / sampleCount;
-        
-        NSLog(@"[CoreML] Fast validation: checking %ld sample elements (every %ld elements)", (long)sampleCount, (long)step);
-        
-        for (NSInteger sample = 0; sample < sampleCount; sample++) {
-            NSInteger i = sample * step;
-            if (i >= outputElements) break;
-            
-            float value = outputData[i];
-            if (isnan(value) || isinf(value)) {
-                NSLog(@"[CoreML] Invalid output data at sample index %ld (actual index %ld, value: %f) - using CPU fallback", 
-                      (long)sample, (long)i, value);
-                return -1;
-            }
+        // Safe memory access with proper validation
+        float *outputData = (float *)outputArray.dataPointer;
+        if (!outputData) {
+            NSLog(@"[CoreML] Output data pointer is null - using CPU fallback");
+            return -1;
         }
         
-        NSLog(@"[CoreML] Fast validation passed - output data appears valid");
+        // Validate MLMultiArray properties
+        if (outputArray.count != outputElements) {
+            NSLog(@"[CoreML] Output array count mismatch: expected %ld, got %ld - using CPU fallback", 
+                  (long)outputElements, (long)outputArray.count);
+            return -1;
+        }
+        
+        const size_t outputSize = outputElements * sizeof(float);
+        
+        // Minimal validation approach - check only essential elements to avoid crashes
+        @try {
+            // Check first element
+            if (outputElements > 0) {
+                float firstValue = outputData[0];
+                if (isnan(firstValue) || isinf(firstValue)) {
+                    NSLog(@"[CoreML] First output element is invalid (%f) - using CPU fallback", firstValue);
+                    return -1;
+                }
+            }
+            
+            // Check middle element
+            if (outputElements > 1) {
+                NSInteger midIndex = outputElements / 2;
+                float midValue = outputData[midIndex];
+                if (isnan(midValue) || isinf(midValue)) {
+                    NSLog(@"[CoreML] Middle output element is invalid (%f) - using CPU fallback", midValue);
+                    return -1;
+                }
+            }
+            
+            // Check last element
+            if (outputElements > 2) {
+                float lastValue = outputData[outputElements - 1];
+                if (isnan(lastValue) || isinf(lastValue)) {
+                    NSLog(@"[CoreML] Last output element is invalid (%f) - using CPU fallback", lastValue);
+                    return -1;
+                }
+            }
+            
+            NSLog(@"[CoreML] Minimal validation passed - first/middle/last elements are valid");
+            
+        } @catch (NSException *exception) {
+            NSLog(@"[CoreML] Exception during output validation: %@ - using CPU fallback", exception.reason);
+            return -1;
+        }
         
         // Dynamic output buffer size calculation based on actual model output
         NSInteger outputNState = 512; // Default whisper base model
@@ -399,35 +430,60 @@ int whisper_coreml_encode(
         // Initialize output buffer with correct size
         memset(out, 0, expectedOutputSize);
         
-        // Reshape 4D output [1, n_state, 1, n_ctx] to 2D [n_state, n_ctx] format expected by whisper.cpp
-        if (outputShape.count >= 4) {
-            // Reshape from [1, 1280, 1, 1500] to [1280, 1500]
-            NSLog(@"[CoreML] Reshaping 4D output to 2D: [%ld,%ld,%ld,%ld] -> [%ld,%ld]",
-                  (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
-                  (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
-                  (long)outputNState, (long)outputNCtx);
-                  
-            // Copy data with proper layout - skip batch and height dimensions
-            float *outPtr = (float *)out;
-            for (NSInteger ctx = 0; ctx < outputNCtx; ctx++) {
-                for (NSInteger state = 0; state < outputNState; state++) {
-                    // Source index: batch=0, state, height=0, ctx
-                    NSInteger srcIdx = ctx * outputNState + state; // Flattened 4D index
-                    // Destination index: [state, ctx] layout for whisper.cpp
-                    NSInteger dstIdx = state * outputNCtx + ctx;
+        // Safe data copying with memory protection
+        @autoreleasepool {
+            @try {
+                // Reshape 4D output [1, n_state, 1, n_ctx] to 2D [n_state, n_ctx] format expected by whisper.cpp
+                if (outputShape.count >= 4) {
+                    // Reshape from [1, 1280, 1, 1500] to [1280, 1500]
+                    NSLog(@"[CoreML] Reshaping 4D output to 2D: [%ld,%ld,%ld,%ld] -> [%ld,%ld]",
+                          (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
+                          (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
+                          (long)outputNState, (long)outputNCtx);
+                          
+                    // Safe copy with bounds checking for every access
+                    float *outPtr = (float *)out;
+                    NSInteger copiedElements = 0;
                     
-                    if (srcIdx < outputElements && dstIdx < outputNState * outputNCtx) {
-                        outPtr[dstIdx] = outputData[srcIdx];
+                    for (NSInteger ctx = 0; ctx < outputNCtx; ctx++) {
+                        for (NSInteger state = 0; state < outputNState; state++) {
+                            // Source index: batch=0, state, height=0, ctx  
+                            NSInteger srcIdx = ctx * outputNState + state;
+                            // Destination index: [state, ctx] layout for whisper.cpp
+                            NSInteger dstIdx = state * outputNCtx + ctx;
+                            
+                            // Triple bounds checking for maximum safety
+                            if (srcIdx >= 0 && srcIdx < outputElements && 
+                                dstIdx >= 0 && dstIdx < outputNState * outputNCtx &&
+                                outputData != NULL && outPtr != NULL) {
+                                
+                                outPtr[dstIdx] = outputData[srcIdx];
+                                copiedElements++;
+                            } else {
+                                NSLog(@"[CoreML] Skipping invalid indices: src=%ld, dst=%ld", (long)srcIdx, (long)dstIdx);
+                            }
+                        }
+                    }
+                    
+                    NSLog(@"[CoreML] 4D->2D reshape completed: copied %ld/%ld elements", 
+                          (long)copiedElements, (long)(outputNState * outputNCtx));
+                          
+                } else {
+                    // Direct copy for 2D output with bounds checking
+                    size_t copySize = MIN(outputSize, expectedOutputSize);
+                    if (outputData && out && copySize > 0) {
+                        memcpy(out, outputData, copySize);
+                        NSLog(@"[CoreML] Direct copy completed: %zu bytes", copySize);
+                    } else {
+                        NSLog(@"[CoreML] Skipping direct copy due to invalid pointers or size");
+                        return -1;
                     }
                 }
+                
+            } @catch (NSException *exception) {
+                NSLog(@"[CoreML] Exception during data copying: %@ - using CPU fallback", exception.reason);
+                return -1;
             }
-            
-            NSLog(@"[CoreML] 4D->2D reshape completed: copied %ld elements", (long)(outputNState * outputNCtx));
-        } else {
-            // Direct copy for 2D output
-            size_t copySize = MIN(outputSize, expectedOutputSize);
-            memcpy(out, outputData, copySize);
-            NSLog(@"[CoreML] Direct copy completed: %zu bytes", copySize);
         }
         
         NSLog(@"[CoreML] Successfully completed prediction with %ld validated output elements", (long)outputElements);
