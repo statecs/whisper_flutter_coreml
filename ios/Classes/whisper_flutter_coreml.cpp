@@ -150,14 +150,32 @@ json transcribe(json jsonBody) noexcept
         {
             for (int i = 0; i < n; i++)
             {
-                pcmf32[i] = float(pcm16[i]) / 32768.0f;
+                float sample = float(pcm16[i]) / 32768.0f;
+                // Validate and clamp audio samples
+                if (std::isnan(sample) || std::isinf(sample)) {
+                    sample = 0.0f;
+                } else if (sample > 1.0f) {
+                    sample = 1.0f;
+                } else if (sample < -1.0f) {
+                    sample = -1.0f;
+                }
+                pcmf32[i] = sample;
             }
         }
         else
         {
             for (int i = 0; i < n; i++)
             {
-                pcmf32[i] = float(pcm16[2 * i] + pcm16[2 * i + 1]) / 65536.0f;
+                float sample = float(pcm16[2 * i] + pcm16[2 * i + 1]) / 65536.0f;
+                // Validate and clamp audio samples
+                if (std::isnan(sample) || std::isinf(sample)) {
+                    sample = 0.0f;
+                } else if (sample > 1.0f) {
+                    sample = 1.0f;
+                } else if (sample < -1.0f) {
+                    sample = -1.0f;
+                }
+                pcmf32[i] = sample;
             }
         }
     }

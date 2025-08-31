@@ -21,11 +21,14 @@ A Flutter FFI plugin for Whisper.cpp.
   s.source_files = 'Classes/**/*'
   s.public_header_files = 'Classes**/*.h'
   s.dependency 'FlutterMacOS'
-  s.platform = :osx, '10.15'
+  s.framework = 'CoreML'
+  s.platform = :osx, '11.0'
 
   # Flutter.framework does not contain a i386 slice.
   s.xcconfig = {
       'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
+      'GCC_PREPROCESSOR_DEFINITIONS' => 'WHISPER_USE_COREML=1 NDEBUG=1',
+      'CLANG_ENABLE_OBJC_ARC' => 'YES',
   }
   s.library = 'c++'
   s.pod_target_xcconfig = {

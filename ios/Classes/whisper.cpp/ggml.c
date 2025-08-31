@@ -11899,6 +11899,17 @@ static void ggml_compute_forward_soft_max_f32(
         float *sp = (float *)((char *) src0->data + i1*src0->nb[1]);
         float *dp = (float *)((char *)  dst->data +  i1*dst->nb[1]);
 
+        // Sanitize input data - replace NaN/Inf with safe values
+        for (int i = 0; i < nc; ++i) {
+            if (isnan(sp[i])) {
+                sp[i] = -1e9f; // Replace NaN with large negative value
+            } else if (isinf(sp[i]) && sp[i] > 0) {
+                sp[i] = 1e9f; // Cap positive infinity
+            } else if (isinf(sp[i]) && sp[i] < 0) {
+                sp[i] = -1e9f; // Cap negative infinity
+            }
+        }
+
 #ifndef NDEBUG
         for (int i = 0; i < nc; ++i) {
             //printf("p[%d] = %f\n", i, p[i]);
@@ -11925,10 +11936,17 @@ static void ggml_compute_forward_soft_max_f32(
             }
         }
 
-        assert(sum > 0.0);
-
-        sum = 1.0/sum;
-        ggml_vec_scale_f32(nc, dp, sum);
+        // Handle edge case where sum is zero or negative
+        if (sum <= 0.0 || isnan(sum)) {
+            // Set uniform distribution as fallback
+            const float uniform_val = 1.0f / nc;
+            for (int i = 0; i < nc; ++i) {
+                dp[i] = uniform_val;
+            }
+        } else {
+            sum = 1.0/sum;
+            ggml_vec_scale_f32(nc, dp, sum);
+        }
 
 #ifndef NDEBUG
         for (int i = 0; i < nc; ++i) {

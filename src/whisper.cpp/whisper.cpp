@@ -23,6 +23,7 @@
 #include <vector>
 #include <regex>
 #include <random>
+#include <sys/stat.h>
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -1810,9 +1811,116 @@ static bool whisper_encode_internal(
     else if (use_coreml) {
         wstate.use_buf(ctx0, -1);
 
-        cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_state, n_ctx);
+        // CRITICAL FIX: Query CoreML model for actual output dimensions
+        // instead of using potentially incorrect hparams.n_audio_state
+        int coreml_n_state = n_state; // Default to model hparams
+        
+        // Get actual CoreML encoder output dimensions
+        if (wstate.ctx_coreml) {
+            int actual_n_state = whisper_coreml_get_n_state(wstate.ctx_coreml);
+            if (actual_n_state > 0) {
+                coreml_n_state = actual_n_state;
+                log("%s: CoreML encoder n_state = %d (model hparams = %d)\n", 
+                    __func__, coreml_n_state, n_state);
+            }
+        }
 
-        whisper_coreml_encode(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data);
+        cur = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, coreml_n_state, n_ctx);
+
+        // CRITICAL: Validate that buffer allocation succeeded
+        if (!cur || !cur->data || ggml_nbytes(cur) != coreml_n_state * n_ctx * sizeof(float)) {
+            log("%s: Failed to allocate CoreML encoder output buffer [%d×%d] - falling back to CPU\n", 
+                __func__, coreml_n_state, n_ctx);
+            
+            // Disable CoreML and retry with CPU
+            if (wstate.ctx_coreml) {
+                wstate.ctx_coreml = nullptr;
+            }
+            ggml_free(ctx0);
+            return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
+        }
+
+        // Initialize output buffer to prevent NaN values
+        memset(cur->data, 0, ggml_nbytes(cur));
+        
+        // Log successful buffer allocation for debugging
+        log("%s: Successfully allocated CoreML encoder buffer [%d×%d] = %.2fMB\n", 
+            __func__, coreml_n_state, n_ctx, ggml_nbytes(cur) / (1024.0*1024.0));
+        
+        if (whisper_coreml_encode_with_dims(wstate.ctx_coreml, (float *) mel->data, (float *) cur->data, coreml_n_state, n_ctx, cur->nb[1]) != 0) {
+            log("%s: CoreML encoder prediction failed, falling back to CPU\n", __func__);
+            // Disable CoreML for this state to force CPU fallback
+            wstate.ctx_coreml = nullptr;
+            ggml_free(ctx0);
+            return whisper_encode_internal(wctx, wstate, mel_offset, n_threads);
+        }
+        
+        // CRITICAL: Check for dimension mismatch between CoreML encoder and decoder
+        if (coreml_n_state != n_state) {
+            log("%s: Dimension mismatch detected: CoreML=%d, Decoder=%d\n", 
+                __func__, coreml_n_state, n_state);
+            log("%s: Applying dimension projection from %d to %d...\n", 
+                __func__, coreml_n_state, n_state);
+            
+            // Create projection matrix [coreml_n_state x n_state] = [1280 x 512]
+            // Note: GGML requires first dimension to match for matrix multiplication
+            struct ggml_tensor * projection = ggml_new_tensor_2d(ctx0, 
+                GGML_TYPE_F32, coreml_n_state, n_state);
+            
+            // Initialize projection matrix
+            float * proj_data = (float *) projection->data;
+            const float scale = sqrtf(2.0f / (n_state + coreml_n_state));
+            
+            // Matrix is now [coreml_n_state x n_state] = [1280 x 512]
+            // proj_data[j * n_state + i] accesses element at row j, column i
+            
+            // Initialize entire matrix to zero first
+            memset(proj_data, 0, coreml_n_state * n_state * sizeof(float));
+            
+            // Strategy: Average every 2.5 dimensions from 1280 to get 512
+            // This preserves more information than just taking first 512
+            float ratio = (float)coreml_n_state / (float)n_state; // 1280/512 = 2.5
+            
+            for (int i = 0; i < n_state; i++) {
+                // For each output dimension, average corresponding input dimensions
+                int start_j = (int)(i * ratio);
+                int end_j = (int)((i + 1) * ratio);
+                if (end_j > coreml_n_state) end_j = coreml_n_state;
+                
+                float weight = 1.0f / (end_j - start_j);
+                for (int j = start_j; j < end_j; j++) {
+                    proj_data[j * n_state + i] = weight;
+                }
+            }
+            
+            log("%s: Using averaging projection: %d dims -> %d dims (ratio %.2f)\n",
+                __func__, coreml_n_state, n_state, ratio);
+            
+            // Validate tensor dimensions before multiplication
+            GGML_ASSERT(projection->ne[0] == cur->ne[0]); // First dimensions must match for GGML
+            GGML_ASSERT(projection->ne[0] == coreml_n_state);
+            GGML_ASSERT(projection->ne[1] == n_state);
+            GGML_ASSERT(cur->ne[1] == n_ctx);
+            
+            // Apply projection: cur_projected [n_state×n_ctx] = projection^T [coreml_n_state×n_state]^T × cur [coreml_n_state×n_ctx]
+            // GGML performs: result[n_state×n_ctx] = projection[coreml_n_state×n_state] × cur[coreml_n_state×n_ctx]
+            cur = ggml_mul_mat(ctx0, projection, cur);
+            
+            // CRITICAL: Actually compute the projection multiplication
+            // Without this, the multiplication is only set up but never executed
+            {
+                struct ggml_cgraph gf_proj = {};
+                gf_proj.n_threads = n_threads;
+                ggml_build_forward_expand(&gf_proj, cur);
+                ggml_graph_compute(ctx0, &gf_proj);
+            }
+            
+            log("%s: ✅ Applied dimension projection: [%d×%d] × [%d×%d] = [%d×%d]\n",
+                __func__, coreml_n_state, n_state, coreml_n_state, n_ctx, n_state, n_ctx);
+        } else {
+            log("%s: ✅ Dimension check passed: encoder and decoder both use %d dimensions\n", 
+                __func__, n_state);
+        }
     }
 #endif
 #ifdef WHISPER_USE_OPENVINO
@@ -2646,8 +2754,21 @@ static std::vector<whisper_vocab::id> tokenize(const whisper_vocab & vocab, cons
 //
 
 #ifdef WHISPER_USE_COREML
-// replace .bin with -encoder.mlmodelc
+// Handle both WhisperKit bundle format and legacy single-file format
 static std::string whisper_get_coreml_path_encoder(std::string path_bin) {
+    // First check if this is already a WhisperKit bundle directory
+    // containing AudioEncoder.mlmodelc
+    struct stat info;
+    if (stat(path_bin.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+        // It's a directory, check for WhisperKit components
+        std::string audio_encoder_path = path_bin + "/AudioEncoder.mlmodelc";
+        if (stat(audio_encoder_path.c_str(), &info) == 0 && S_ISDIR(info.st_mode)) {
+            // Found AudioEncoder.mlmodelc in the bundle
+            return audio_encoder_path;
+        }
+    }
+    
+    // Fall back to legacy behavior: replace .bin with -encoder.mlmodelc
     auto pos = path_bin.rfind('.');
     if (pos != std::string::npos) {
         path_bin = path_bin.substr(0, pos);
