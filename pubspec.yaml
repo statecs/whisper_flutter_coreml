@@ -1,6 +1,6 @@
 name: whisper_flutter_coreml
 description: A flutter library for offline speech-to-text conversion which use whisper.cpp models implementation for Android、iOS、macOS.
-version: 1.0.0
+version: 1.0.1
 repository: https://github.com/statecs/whisper_flutter_coreml
 issue_tracker: https://github.com/statecs/whisper_flutter_coreml/issues
 homepage: https://github.com/statecs/whisper_flutter_coreml
