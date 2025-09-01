@@ -1,10 +1,4 @@
-/*
- * Copyright (c) 田梓萱[小草林] 2021-2024.
- * All Rights Reserved.
- * All codes are protected by China's regulations on the protection of computer software, and infringement must be investigated.
- * 版权所有 (c) 田梓萱[小草林] 2021-2024.
- * 所有代码均受中国《计算机软件保护条例》保护，侵权必究.
- */
+
 
 import "dart:io";
 

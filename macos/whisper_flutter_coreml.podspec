@@ -9,9 +9,9 @@ Pod::Spec.new do |s|
   s.description      = <<-DESC
 A Flutter FFI plugin for Whisper.cpp.
                        DESC
-  s.homepage         = 'https://www.xcl.ink'
+  s.homepage         = 'https://cstate.se'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { '田梓萱' => 'zixuanxcl@gmail.com' }
+  s.author           = { 'statecs' => 'hello@cstate.se' }
   s.source           = { :path => '.' }
 
   # This will ensure the source files in Classes/ are included in the native
