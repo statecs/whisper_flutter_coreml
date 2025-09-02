@@ -7,7 +7,9 @@ part "request_bean.freezed.dart";
 part "request_bean.g.dart";
 
 @unfreezed
-class TranscribeRequest with _$TranscribeRequest implements WhisperRequestDto {
+abstract class TranscribeRequest with _$TranscribeRequest {
+  TranscribeRequest._();
+  
   factory TranscribeRequest({
     required String audio,
     @Default(false) bool isTranslate,
@@ -22,34 +24,14 @@ class TranscribeRequest with _$TranscribeRequest implements WhisperRequestDto {
     @Default(false) bool diarize,
     @Default(false) bool speedUp,
   }) = _TranscribeRequest;
+  
   factory TranscribeRequest.fromJson(Map<String, dynamic> json) =>
       _$TranscribeRequestFromJson(json);
-  
-  @override
-  String get specialType => "getTextFromWavFile";
-  
-  @override
-  String toRequestString() {
-    return json.encode({
-      "@type": specialType,
-      "audio": audio,
-      "is_translate": isTranslate,
-      "threads": threads,
-      "is_verbose": isVerbose,
-      "language": language,
-      "is_special_tokens": isSpecialTokens,
-      "is_no_timestamps": isNoTimestamps,
-      "n_processors": nProcessors,
-      "split_on_word": splitOnWord,
-      "no_fallback": noFallback,
-      "diarize": diarize,
-      "speed_up": speedUp,
-    });
-  }
 }
 
+
 @freezed
-class TranscribeRequestDto
+abstract class TranscribeRequestDto
     with _$TranscribeRequestDto
     implements WhisperRequestDto {
   const factory TranscribeRequestDto({

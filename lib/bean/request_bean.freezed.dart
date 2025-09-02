@@ -159,7 +159,7 @@ class _$TranscribeRequestCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _TranscribeRequest implements TranscribeRequest {
+class _TranscribeRequest extends TranscribeRequest {
   _TranscribeRequest(
       {required this.audio,
       this.isTranslate = false,
@@ -172,7 +172,8 @@ class _TranscribeRequest implements TranscribeRequest {
       this.splitOnWord = false,
       this.noFallback = false,
       this.diarize = false,
-      this.speedUp = false});
+      this.speedUp = false})
+      : super._();
   factory _TranscribeRequest.fromJson(Map<String, dynamic> json) =>
       _$TranscribeRequestFromJson(json);
 

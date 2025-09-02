@@ -11,7 +11,9 @@ part "response_bean.freezed.dart";
 part "response_bean.g.dart";
 
 @unfreezed
-class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
+abstract class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
+  WhisperTranscribeResponse._();
+  
   factory WhisperTranscribeResponse({
     @JsonKey(name: "@type") required String type,
     required String text,
@@ -24,8 +26,9 @@ class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
 }
 
 @unfreezed
-class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
-  ///
+abstract class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
+  WhisperTranscribeSegment._();
+  
   factory WhisperTranscribeSegment({
     @JsonKey(
       name: "from_ts",
@@ -52,7 +55,9 @@ class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
 }
 
 @unfreezed
-class WhisperVersionResponse with _$WhisperVersionResponse {
+abstract class WhisperVersionResponse with _$WhisperVersionResponse {
+  WhisperVersionResponse._();
+  
   factory WhisperVersionResponse({
     @JsonKey(name: "@type") required String type,
     required String message,
@@ -63,7 +68,9 @@ class WhisperVersionResponse with _$WhisperVersionResponse {
 }
 
 @unfreezed
-class WhisperMemoryStatusResponse with _$WhisperMemoryStatusResponse {
+abstract class WhisperMemoryStatusResponse with _$WhisperMemoryStatusResponse {
+  WhisperMemoryStatusResponse._();
+  
   factory WhisperMemoryStatusResponse({
     @JsonKey(name: "@type") required String type,
     @JsonKey(name: "available_mb") required double availableMb,

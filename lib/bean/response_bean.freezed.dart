@@ -91,11 +91,12 @@ class _$WhisperTranscribeResponseCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _WhisperTranscribeResponse implements WhisperTranscribeResponse {
+class _WhisperTranscribeResponse extends WhisperTranscribeResponse {
   _WhisperTranscribeResponse(
       {@JsonKey(name: "@type") required this.type,
       required this.text,
-      @JsonKey(name: "segments") required this.segments});
+      @JsonKey(name: "segments") required this.segments})
+      : super._();
   factory _WhisperTranscribeResponse.fromJson(Map<String, dynamic> json) =>
       _$WhisperTranscribeResponseFromJson(json);
 
@@ -261,7 +262,7 @@ class _$WhisperTranscribeSegmentCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _WhisperTranscribeSegment implements WhisperTranscribeSegment {
+class _WhisperTranscribeSegment extends WhisperTranscribeSegment {
   _WhisperTranscribeSegment(
       {@JsonKey(
           name: "from_ts", fromJson: WhisperTranscribeSegment._durationFromInt)
@@ -269,7 +270,8 @@ class _WhisperTranscribeSegment implements WhisperTranscribeSegment {
       @JsonKey(
           name: "to_ts", fromJson: WhisperTranscribeSegment._durationFromInt)
       required this.toTs,
-      required this.text});
+      required this.text})
+      : super._();
   factory _WhisperTranscribeSegment.fromJson(Map<String, dynamic> json) =>
       _$WhisperTranscribeSegmentFromJson(json);
 
@@ -422,9 +424,10 @@ class _$WhisperVersionResponseCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _WhisperVersionResponse implements WhisperVersionResponse {
+class _WhisperVersionResponse extends WhisperVersionResponse {
   _WhisperVersionResponse(
-      {@JsonKey(name: "@type") required this.type, required this.message});
+      {@JsonKey(name: "@type") required this.type, required this.message})
+      : super._();
   factory _WhisperVersionResponse.fromJson(Map<String, dynamic> json) =>
       _$WhisperVersionResponseFromJson(json);
 
@@ -576,11 +579,12 @@ class _$WhisperMemoryStatusResponseCopyWithImpl<$Res>
 
 /// @nodoc
 @JsonSerializable()
-class _WhisperMemoryStatusResponse implements WhisperMemoryStatusResponse {
+class _WhisperMemoryStatusResponse extends WhisperMemoryStatusResponse {
   _WhisperMemoryStatusResponse(
       {@JsonKey(name: "@type") required this.type,
       @JsonKey(name: "available_mb") required this.availableMb,
-      required this.sufficient});
+      required this.sufficient})
+      : super._();
   factory _WhisperMemoryStatusResponse.fromJson(Map<String, dynamic> json) =>
       _$WhisperMemoryStatusResponseFromJson(json);
 
