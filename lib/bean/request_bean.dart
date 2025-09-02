@@ -100,3 +100,19 @@ class VersionRequest with _$VersionRequest implements WhisperRequestDto {
     });
   }
 }
+
+@freezed
+class MemoryCheckRequest with _$MemoryCheckRequest implements WhisperRequestDto {
+  const factory MemoryCheckRequest() = _MemoryCheckRequest;
+  const MemoryCheckRequest._();
+
+  @override
+  String get specialType => "checkMemory";
+
+  @override
+  String toRequestString() {
+    return json.encode({
+      "@type": specialType,
+    });
+  }
+}

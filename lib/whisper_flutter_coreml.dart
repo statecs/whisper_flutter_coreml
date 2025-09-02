@@ -5,7 +5,6 @@ import "dart:isolate";
 
 import "package:ffi/ffi.dart";
 import "package:flutter/foundation.dart";
-import "package:flutter/services.dart";
 import "package:path_provider/path_provider.dart";
 import "package:whisper_flutter_coreml/bean/_models.dart";
 import "package:whisper_flutter_coreml/bean/whisper_dto.dart";
@@ -31,48 +30,22 @@ class Whisper {
   // override of model download host
   final String? downloadHost;
 
-  static const MethodChannel _memoryChannel = MethodChannel('whisper_flutter_coreml/memory');
-  
-  /// Initialize memory warning handling for iOS
-  static void _setupMemoryWarningHandler() {
-    if (Platform.isIOS && !kDebugMode) {
-      _memoryChannel.setMethodCallHandler((MethodCall call) async {
-        switch (call.method) {
-          case 'memoryWarning':
-            debugPrint('[Whisper Memory] iOS memory warning received - cleaning up');
-            await _handleMemoryWarning();
-            break;
-          default:
-            break;
-        }
-      });
-    }
-  }
-  
-  /// Handle memory warnings by cleaning up resources
-  static Future<void> _handleMemoryWarning() async {
-    try {
-      // Force garbage collection
-      await Future.delayed(Duration.zero); // Yield to allow GC
-      
-      // Log memory status
-      if (kDebugMode) {
-        debugPrint('[Whisper Memory] Memory warning handled - resources cleaned');
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[Whisper Memory] Error handling memory warning: $e');
-      }
-    }
-  }
-  
-  /// Check available memory before processing (iOS only)
+  /// Check available memory before processing using native FFI
   Future<bool> _checkMemoryAvailable() async {
     if (!Platform.isIOS) return true;
     
     try {
-      final bool? hasMemory = await _memoryChannel.invokeMethod('checkMemoryAvailable');
-      return hasMemory ?? true;
+      final Map<String, dynamic> result = await _request(
+        whisperRequest: const MemoryCheckRequest(),
+      );
+      
+      final WhisperMemoryStatusResponse response = WhisperMemoryStatusResponse.fromJson(result);
+      
+      if (kDebugMode) {
+        debugPrint('[Whisper Memory] Available: ${response.availableMb.toStringAsFixed(1)} MB, Sufficient: ${response.sufficient}');
+      }
+      
+      return response.sufficient;
     } catch (e) {
       if (kDebugMode) {
         debugPrint('[Whisper Memory] Error checking memory: $e');
@@ -145,15 +118,14 @@ class Whisper {
   Future<WhisperTranscribeResponse> transcribe({
     required TranscribeRequest transcribeRequest,
   }) async {
-    // Setup memory warning handler on first use
-    _setupMemoryWarningHandler();
-    
-    // Check memory availability before processing (iOS only)
+    // Check memory availability before processing (iOS only) - MUST be done in main isolate
     if (!await _checkMemoryAvailable()) {
       throw Exception('Insufficient memory available for transcription. Please close other apps and try again.');
     }
     
     final String modelDir = await _getModelDir();
+    
+    // Note: Background isolate cannot access method channels, so memory check is done above
     final Map<String, dynamic> result = await _request(
       whisperRequest: TranscribeRequestDto.fromTranscribeRequest(
         transcribeRequest,

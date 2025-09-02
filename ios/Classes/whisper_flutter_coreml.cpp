@@ -249,6 +249,9 @@ json transcribe(json jsonBody) noexcept
 
             if (!params.no_timestamps) {
                 jsonResult["segments"] = segmentsJson;
+            } else {
+                // Always provide segments field, even if null when timestamps disabled
+                jsonResult["segments"] = nullptr;
             }
         }
     }
@@ -284,6 +287,22 @@ extern "C"
             {
                 jsonResult["@type"] = "version";
                 jsonResult["message"] = "lib version: v1.0.1";
+                return jsonToChar(jsonResult);
+            }
+            if (jsonBody["@type"] == "checkMemory")
+            {
+                jsonResult["@type"] = "memory_status";
+#ifdef __APPLE__
+                // Use CoreML memory functions on iOS
+                size_t available = whisper_coreml_get_available_memory();
+                bool sufficient = whisper_coreml_check_memory_sufficient(200 * 1024 * 1024); // 200MB threshold
+                jsonResult["available_mb"] = available / (1024.0 * 1024.0);
+                jsonResult["sufficient"] = sufficient;
+#else
+                // Assume sufficient on non-iOS platforms
+                jsonResult["available_mb"] = 1024.0; // 1GB assumed
+                jsonResult["sufficient"] = true;
+#endif
                 return jsonToChar(jsonResult);
             }
 

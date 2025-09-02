@@ -61,3 +61,15 @@ class WhisperVersionResponse with _$WhisperVersionResponse {
   factory WhisperVersionResponse.fromJson(Map<String, dynamic> json) =>
       _$WhisperVersionResponseFromJson(json);
 }
+
+@unfreezed
+class WhisperMemoryStatusResponse with _$WhisperMemoryStatusResponse {
+  factory WhisperMemoryStatusResponse({
+    @JsonKey(name: "@type") required String type,
+    @JsonKey(name: "available_mb") required double availableMb,
+    required bool sufficient,
+  }) = _WhisperMemoryStatusResponse;
+
+  factory WhisperMemoryStatusResponse.fromJson(Map<String, dynamic> json) =>
+      _$WhisperMemoryStatusResponseFromJson(json);
+}
