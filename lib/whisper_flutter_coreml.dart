@@ -100,11 +100,24 @@ class Whisper {
     final String modelDir = await _getModelDir();
     final File modelFile = File(modelToInit.getPath(modelDir));
     final bool isModelExist = modelFile.existsSync();
+    final bool hasCoreML = modelToInit.hasCoreMLModel(modelDir);
     
     if (isModelExist) {
       if (kDebugMode) {
-        final bool hasCoreML = modelToInit.hasCoreMLModel(modelDir);
         debugPrint("Use existing model ${modelToInit.modelName} ${hasCoreML ? '(CoreML available)' : '(CPU only)'}");
+      }
+      
+      // Even if the main model exists, check if we should download CoreML model
+      if (!hasCoreML && (Platform.isIOS || Platform.isMacOS)) {
+        if (kDebugMode) {
+          debugPrint("Attempting to download CoreML model for ${modelToInit.modelName}...");
+        }
+        await downloadModel(
+            model: modelToInit, 
+            destinationPath: modelDir, 
+            downloadHost: downloadHost,
+            downloadCoreML: true,
+            skipBinDownload: true);
       }
       return;
     } else {

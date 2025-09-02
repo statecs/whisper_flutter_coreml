@@ -111,46 +111,54 @@ Future<String> downloadModel(
     {required WhisperModel model,
     required String destinationPath,
     String? downloadHost,
-    bool downloadCoreML = true}) async {
-  if (kDebugMode) {
-    debugPrint("Download model ${model.modelName}");
-  }
-  final httpClient = HttpClient();
-
-  Uri modelUri;
-
-  if (downloadHost == null || downloadHost.isEmpty) {
-    /// Huggingface url to download model
-    modelUri = Uri.parse(
-      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model.modelName}.bin",
-    );
-  } else {
-    modelUri = Uri.parse(
-      "$downloadHost/ggml-${model.modelName}.bin",
-    );
-  }
-
-  final request = await httpClient.getUrl(
-    modelUri,
-  );
-
-  final response = await request.close();
-
+    bool downloadCoreML = true,
+    bool skipBinDownload = false}) async {
   final file = File("$destinationPath/ggml-${model.modelName}.bin");
-  final raf = file.openSync(mode: FileMode.write);
+  
+  if (!skipBinDownload) {
+    if (kDebugMode) {
+      debugPrint("Download model ${model.modelName}");
+    }
+    final httpClient = HttpClient();
 
-  await for (var chunk in response) {
-    raf.writeFromSync(chunk);
-  }
+    Uri modelUri;
 
-  await raf.close();
+    if (downloadHost == null || downloadHost.isEmpty) {
+      /// Huggingface url to download model
+      modelUri = Uri.parse(
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model.modelName}.bin",
+      );
+    } else {
+      modelUri = Uri.parse(
+        "$downloadHost/ggml-${model.modelName}.bin",
+      );
+    }
 
-  if (kDebugMode) {
-    debugPrint("Download complete. Path = ${file.path}");
+    final request = await httpClient.getUrl(
+      modelUri,
+    );
+
+    final response = await request.close();
+
+    final raf = file.openSync(mode: FileMode.write);
+
+    await for (var chunk in response) {
+      raf.writeFromSync(chunk);
+    }
+
+    await raf.close();
+
+    if (kDebugMode) {
+      debugPrint("Download complete. Path = ${file.path}");
+    }
+  } else {
+    if (kDebugMode) {
+      debugPrint("Skipping .bin download for ${model.modelName} - file already exists");
+    }
   }
   
   // Attempt to download CoreML model for hardware acceleration
-  if (downloadCoreML && Platform.isIOS) {
+  if (downloadCoreML && (Platform.isIOS || Platform.isMacOS)) {
     await _downloadCoreMLModel(
       model: model,
       destinationPath: destinationPath,
