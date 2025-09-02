@@ -245,6 +245,9 @@ int whisper_coreml_encode_with_dims(
         NSLog(@"[CoreML] Model inputs: %@", [inputDescriptions.allKeys componentsJoinedByString:@", "]);
         NSLog(@"[CoreML] Model outputs: %@", [outputDescriptions.allKeys componentsJoinedByString:@", "]);
         
+        // Declare variables for the entire function scope
+        NSInteger outputElements = 0;
+        
         // Find the input feature (typically named "melspectrogram" or similar)
         NSString *inputName = inputDescriptions.allKeys.firstObject;
         if (!inputName) {
@@ -485,8 +488,8 @@ int whisper_coreml_encode_with_dims(
                   (long)(stride0_elements * sizeof(float)), (long)(stride1_elements * sizeof(float)));
         }
         
-        // Calculate output size
-        NSInteger outputElements = 1;
+        // Re-calculate output size for validation
+        outputElements = 1;
         for (NSNumber *dim in outputShape) {
             outputElements *= dim.integerValue;
         }
@@ -674,14 +677,13 @@ int whisper_coreml_encode_with_dims(
         
         // Safe data copying with memory protection and optimized autorelease pools
         @autoreleasepool {
-            @try {
-                // MEMORY LEAK PREVENTION: Clear any previous autorelease objects
-                @autoreleasepool {
-                    // Force cleanup of any pending autoreleased objects
-                }
-                
-                // Smart tensor reshaping with size adaptation
-                if (outputShape.count >= 4) {
+            // MEMORY LEAK PREVENTION: Clear any previous autorelease objects
+            @autoreleasepool {
+                // Force cleanup of any pending autoreleased objects
+            }
+            
+            // Smart tensor reshaping with size adaptation
+            if (outputShape.count >= 4) {
                     NSLog(@"[CoreML] Reshaping 4D model output [%ld,%ld,%ld,%ld] to whisper 2D format [%ld×%ld]",
                           (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
                           (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
@@ -730,165 +732,39 @@ int whisper_coreml_encode_with_dims(
                     NSLog(@"[CoreML] Starting tensor copy of %ld elements with %@ data type", 
                           (long)totalElements, dataTypeName);
                     
-                    // OPTIMIZATION: Use batch processing with autorelease pools for memory efficiency
-                    const NSInteger chunkSize = needsConversion ? 50 : 200; // Smaller chunks to prevent memory buildup
-                    NSInteger processedCtx = 0;
-                    
-                    while (processedCtx < copyNCtx) {
-                        // MEMORY LEAK PREVENTION: Create autorelease pool for each chunk
-                        @autoreleasepool {
-                            NSInteger currentChunkSize = MIN(chunkSize, copyNCtx - processedCtx);
-                            NSInteger chunkEnd = processedCtx + currentChunkSize;
-                            
-                            for (NSInteger ctx = processedCtx; ctx < chunkEnd; ctx++) {
-                            for (NSInteger state = 0; state < copyNState; state++) {
-                                // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
-                                // Correct flattened index for [1, modelNState, 1, modelNCtx]
-                                // 4D index: batch=0, state, height=0, ctx
-                                NSInteger srcIdx = (0 * modelNState * 1 * modelNCtx) + 
-                                                 (state * 1 * modelNCtx) + 
-                                                 (0 * modelNCtx) + ctx;
-                                
-                                // Whisper 2D layout: [state, ctx]
-                                NSInteger dstIdx = state * whisperNCtx + ctx;
-                                
-                                // CRITICAL: Comprehensive bounds checking with detailed validation
-                                bool isValidSrc = (srcIdx >= 0 && srcIdx < outputElements);
-                                bool isValidDst = (dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx);
-                                bool isValidPointers = (outputDataPtr != NULL && outPtr != NULL);
-                                bool isValidDims = (state < modelNState && ctx < modelNCtx && 
-                                                   state < whisperNState && ctx < whisperNCtx);
-                                
-                                if (isValidSrc && isValidDst && isValidPointers && isValidDims) {
-                                    // CRITICAL: Use stride-aware memory access instead of flat array indexing
-                                    @try {
-                                        // CRITICAL: Get source value with proper data type handling
-                                        float srcValue = 0.0f;
-                                        
-                                        // Calculate 4D offset with proper stride validation
-                                        if (outputStrides.count < 4) {
-                                            NSLog(@"[CoreML] ERROR: Insufficient strides for 4D access - got %ld strides", (long)outputStrides.count);
-                                            return -1;
-                                        }
-                                        
-                                        NSInteger srcOffset = 0 * outputStrides[0].integerValue +
-                                                            state * outputStrides[1].integerValue +
-                                                            0 * outputStrides[2].integerValue +
-                                                            ctx * outputStrides[3].integerValue;
-                                        
-                                        // Bounds check - use actualMemoryElements to account for stride padding
-                                        if (srcOffset < 0 || srcOffset >= actualMemoryElements) {
-                                            NSLog(@"[CoreML] ERROR: Offset %ld out of bounds [0, %ld) at [%ld,%ld]", 
-                                                  (long)srcOffset, (long)actualMemoryElements, (long)state, (long)ctx);
-                                            NSLog(@"[CoreML] Debug: logical elements=%ld, checking against padded memory=%ld", 
-                                                  (long)outputElements, (long)actualMemoryElements);
-                                            return -1;
-                                        }
-                                        
-                                        // Extract value based on actual data type
-                                        void *dataPtr = outputArray.dataPointer;
-                                        switch (outputArray.dataType) {
-                                            case MLMultiArrayDataTypeFloat16: {
-                                                // OPTIMIZED: Use Apple's highly efficient Float16 conversion
-                                                __fp16 *f16Data = (__fp16*)dataPtr;
-                                                __fp16 f16Value = f16Data[srcOffset];
-                                                // Direct hardware-accelerated conversion
-                                                srcValue = (float)f16Value;
-                                                break;
-                                            }
-                                            case MLMultiArrayDataTypeFloat32: {
-                                                float *f32Data = (float*)dataPtr;
-                                                srcValue = f32Data[srcOffset];
-                                                break;
-                                            }
-                                            case MLMultiArrayDataTypeDouble: {
-                                                double *f64Data = (double*)dataPtr;
-                                                srcValue = (float)f64Data[srcOffset];
-                                                break;
-                                            }
-                                            default:
-                                                NSLog(@"[CoreML] ERROR: Unsupported data type during value extraction");
-                                                return -1;
-                                        }
-                                        
-                                        // For GGML tensor: use proper stride-based access
-                                        // CRITICAL FIX: GGML tensor layout is [state, ctx] not [ctx, state]
-                                        // nb[0] = 4 bytes (stride between states), nb[1] = out_stride_bytes (stride between contexts)
-                                        char *ggmlData = (char*)out;
-                                        size_t ggmlOffset = state * sizeof(float) + ctx * out_stride_bytes;
-                                        float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
-                                        
-                                        // Perform safe memory copy
-                                        *ggmlPtr = srcValue;
-                                        copiedElements++;
-                                        
-                                        // Occasional validation for debugging (every 10000 elements)
-                                        if (copiedElements % 10000 == 0) {
-                                            NSLog(@"[CoreML] Progress: copied %ld elements, current [%ld,%ld] = %f", 
-                                                  (long)copiedElements, (long)state, (long)ctx, srcValue);
-                                        }
-                                        
-                                    } @catch (NSException *e) {
-                                        NSLog(@"[CoreML] Exception during stride-aware copy at [%ld,%ld]: %@", 
-                                              (long)state, (long)ctx, e.reason);
-                                        NSLog(@"[CoreML] Stopping tensor copy to prevent crash - copied %ld elements", (long)copiedElements);
-                                        return -1;
-                                    }
-                                } else {
-                                    // Log detailed failure reason for debugging
-                                    if (!isValidSrc) {
-                                        NSLog(@"[CoreML] ERROR: Invalid source index - srcIdx=%ld, outputElements=%ld", 
-                                              (long)srcIdx, (long)outputElements);
-                                    }
-                                    if (!isValidDst) {
-                                        NSLog(@"[CoreML] ERROR: Invalid destination index - dstIdx=%ld, bufferSize=%ld", 
-                                              (long)dstIdx, (long)(whisperNState * whisperNCtx));
-                                    }
-                                    if (!isValidPointers) {
-                                        NSLog(@"[CoreML] ERROR: Invalid pointers - outputDataPtr=%p, outPtr=%p", outputDataPtr, outPtr);
-                                    }
-                                    if (!isValidDims) {
-                                        NSLog(@"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld", 
-                                              (long)state, (long)MIN(modelNState, whisperNState), (long)ctx, (long)MIN(modelNCtx, whisperNCtx));
-                                    }
-                                    
-                                    // Stop processing on first error to prevent crash
-                                    NSLog(@"[CoreML] Stopping tensor copy due to bounds violation - copied %ld elements so far", (long)copiedElements);
-                                    return -1;
-                                }
+                    // OPTIMIZATION: Simple tensor copy with periodic autorelease pool cleanup
+                    copiedElements = 0;
+                    for (NSInteger ctx = 0; ctx < copyNCtx; ctx++) {
+                        // Create smaller autorelease pools every 100 context frames
+                        if (ctx % 100 == 0) {
+                            @autoreleasepool {
+                                // Small cleanup every 100 frames
                             }
-                            } // End of context loop
-                        } // End of autorelease pool for this chunk
+                        }
                         
-                        processedCtx = chunkEnd;
-                        
-                        // Progress reporting - show every chunk to demonstrate it's working
-                        if (processedCtx % chunkSize == 0 || processedCtx >= copyNCtx) {
-                            double progress = 100.0 * processedCtx / copyNCtx;
-                            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:copyStartTime];
-                            NSInteger elementsProcessed = processedCtx * copyNState;
-                            double elementsPerSecond = elementsProcessed / elapsed;
+                        for (NSInteger state = 0; state < copyNState; state++) {
+                            // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
+                            NSInteger srcIdx = (0 * modelNState * 1 * modelNCtx) + 
+                                             (state * 1 * modelNCtx) + 
+                                             (0 * modelNCtx) + ctx;
                             
-                            NSLog(@"[CoreML] Progress: %ld/%ld frames (%.1f%%) - %.0f elements/sec, %ld total elements copied",
-                                  (long)processedCtx, (long)copyNCtx, progress, elementsPerSecond, (long)copiedElements);
-                            
-                            // Estimate time remaining
-                            if (processedCtx < copyNCtx && elementsPerSecond > 0) {
-                                NSInteger remaining = totalElements - elementsProcessed;
-                                double timeRemaining = remaining / elementsPerSecond;
-                                NSLog(@"[CoreML] Estimated time remaining: %.1f seconds", timeRemaining);
+                            // Bounds checking
+                            if (srcIdx >= 0 && srcIdx < outputElements) {
+                                // Extract value from CoreML output
+                                float *f32Data = (float*)outputArray.dataPointer;
+                                float srcValue = f32Data[srcIdx];
+                                
+                                // Copy to whisper buffer using stride
+                                char *ggmlData = (char*)out;
+                                size_t ggmlOffset = state * sizeof(float) + ctx * out_stride_bytes;
+                                float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
+                                *ggmlPtr = srcValue;
+                                copiedElements++;
                             }
                         }
                     }
                     
-                    // Final performance metrics
-                    NSTimeInterval totalTime = [[NSDate date] timeIntervalSinceDate:copyStartTime];
-                    double finalElementsPerSecond = copiedElements / totalTime;
-                    
-                    NSLog(@"[CoreML] ✅ Tensor copy completed: %ld/%ld elements in %.3f seconds (%.0f elements/sec)", 
-                          (long)copiedElements, (long)totalElements, totalTime, finalElementsPerSecond);
-                    NSLog(@"[CoreML] 4D->2D adaptive reshape completed: copied %ld elements to [%ld×%ld] whisper buffer", 
-                          (long)copiedElements, (long)whisperNState, (long)whisperNCtx);
+                    NSLog(@"[CoreML] Tensor copy completed: %ld elements", (long)copiedElements);
                           
                 } else {
                     // Direct copy for 2D output with size adaptation
@@ -906,16 +782,13 @@ int whisper_coreml_encode_with_dims(
                         return -1;
                     }
                 }
+            } // End of if/else block for tensor reshaping
                 
-            } @catch (NSException *exception) {
-                NSLog(@"[CoreML] Exception during data copying: %@ - using CPU fallback", exception.reason);
-                return -1;
-            }
-        }
+        } // End of autoreleasepool for data copying
         
         NSLog(@"[CoreML] Successfully completed prediction with %ld validated output elements", (long)outputElements);
         return 0; // Success
-        
+    
     } @catch (NSException *exception) {
         NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exception.reason);
         
@@ -1011,9 +884,9 @@ size_t whisper_coreml_get_available_memory(void) {
             uint64_t available_pages = vm_stat.free_count + vm_stat.inactive_count;
             size_t available_bytes = available_pages * pagesize;
             
-            NSLog(@"[CoreML Memory] Available: %.2f MB (free: %lld + inactive: %lld pages, %u bytes/page)", 
+            NSLog(@"[CoreML Memory] Available: %.2f MB (free: %u + inactive: %u pages, %lu bytes/page)", 
                   available_bytes / (1024.0 * 1024.0), 
-                  vm_stat.free_count, vm_stat.inactive_count, pagesize);
+                  vm_stat.free_count, vm_stat.inactive_count, (unsigned long)pagesize);
             
             return available_bytes;
         } else {

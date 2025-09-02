@@ -1,0 +1,28 @@
+{
+  "" : {
+    "diagnostics" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/Runner-master.dia",
+    "emit-module-dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/Runner-master-emit-module.d",
+    "emit-module-diagnostics" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/Runner-master-emit-module.dia",
+    "swift-dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/Runner-master.swiftdeps"
+  },
+  "/Users/statecs/Git/whisper_flutter_coreml/example/ios/Runner/AppDelegate.swift" : {
+    "const-values" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.swiftconstvalues",
+    "dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.d",
+    "diagnostics" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.dia",
+    "index-unit-output-path" : "/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.o",
+    "llvm-bc" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.bc",
+    "object" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.o",
+    "swift-dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate.swiftdeps",
+    "swiftmodule" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/AppDelegate~partial.swiftmodule"
+  },
+  "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/DerivedSources/GeneratedAssetSymbols.swift" : {
+    "const-values" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.swiftconstvalues",
+    "dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.d",
+    "diagnostics" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.dia",
+    "index-unit-output-path" : "/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.o",
+    "llvm-bc" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.bc",
+    "object" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.o",
+    "swift-dependencies" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols.swiftdeps",
+    "swiftmodule" : "/Users/statecs/Git/whisper_flutter_coreml/example/ios/build/Runner.build/Debug-iphonesimulator/Runner.build/Objects-normal/x86_64/GeneratedAssetSymbols~partial.swiftmodule"
+  }
+}
