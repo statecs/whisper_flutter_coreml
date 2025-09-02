@@ -13,35 +13,83 @@ import "package:flutter/foundation.dart";
 /// Available whisper models
 enum WhisperModel {
   // no model
-  none(""),
+  none("", 0),
 
   /// tiny model for all languages
-  tiny("tiny"),
+  tiny("tiny", 39),
 
   /// base model for all languages
-  base("base"),
+  base("base", 142),
 
   /// small model for all languages
-  small("small"),
+  small("small", 466),
 
-  /// turbo model for all languages
-  turbo("large-v3-turbo"),
+  /// turbo model for all languages  
+  turbo("large-v3-turbo", 1536),
 
   /// medium model for all languages
-  medium("medium"),
+  medium("medium", 1500),
 
   /// large model for all languages
-  largeV1("large-v1"),
-  largeV2("large-v2");
+  largeV1("large-v1", 2900),
+  largeV2("large-v2", 2900);
 
-  const WhisperModel(this.modelName);
+  const WhisperModel(this.modelName, this.memoryRequirementMB);
 
   /// Public name of model
   final String modelName;
+  
+  /// Memory requirement in MB (including working memory overhead)
+  final int memoryRequirementMB;
 
   /// Get local path of model file
   String getPath(String dir) {
     return "$dir/ggml-$modelName.bin";
+  }
+  
+  /// Check if this model can run with available memory (MB)
+  bool canRunWithMemory(double availableMemoryMB) {
+    if (this == WhisperModel.none) return true;
+    
+    // Use 3x safety factor to account for:
+    // 1. Model loading overhead
+    // 2. Input/output buffers
+    // 3. System memory pressure protection
+    final requiredWithSafety = memoryRequirementMB * 3.0;
+    
+    if (kDebugMode) {
+      debugPrint('[Memory Check] Model ${modelName}: requires ${memoryRequirementMB}MB (${requiredWithSafety.toInt()}MB with 3x safety), available: ${availableMemoryMB.toInt()}MB');
+    }
+    
+    return availableMemoryMB >= requiredWithSafety;
+  }
+  
+  /// Get the best model that can run with available memory
+  static WhisperModel getBestModelForMemory(double availableMemoryMB) {
+    // Try models in order of preference (quality)
+    final modelsInPreferenceOrder = [
+      WhisperModel.turbo,
+      WhisperModel.largeV2, 
+      WhisperModel.largeV1,
+      WhisperModel.medium,
+      WhisperModel.small,
+      WhisperModel.base,
+      WhisperModel.tiny,
+    ];
+    
+    for (final model in modelsInPreferenceOrder) {
+      if (model.canRunWithMemory(availableMemoryMB)) {
+        if (kDebugMode) {
+          debugPrint('[Memory Selection] Selected model: ${model.modelName} (requires ${model.memoryRequirementMB}MB)');
+        }
+        return model;
+      }
+    }
+    
+    if (kDebugMode) {
+      debugPrint('[Memory Selection] No model fits in ${availableMemoryMB.toInt()}MB - using tiny as last resort');
+    }
+    return WhisperModel.tiny; // Fallback to smallest model
   }
 }
 

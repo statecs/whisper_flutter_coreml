@@ -952,15 +952,15 @@ void whisper_coreml_handle_memory_pressure(void) {
 }
 
 bool whisper_coreml_should_fallback_to_cpu(size_t buffer_size) {
-    // Define memory thresholds based on iPhone 11 capabilities (4GB total, ~2GB available to apps)
-    const size_t CRITICAL_MEMORY_THRESHOLD = 100 * 1024 * 1024; // 100 MB minimum
-    const size_t LARGE_BUFFER_THRESHOLD = 50 * 1024 * 1024;     // 50 MB per buffer
+    // Define memory thresholds for real-world Whisper model usage
+    const size_t CRITICAL_MEMORY_THRESHOLD = 500 * 1024 * 1024; // 500 MB minimum for any model
+    const size_t LARGE_MODEL_THRESHOLD = 1000 * 1024 * 1024;    // 1 GB for medium+ models
     
     size_t available = whisper_coreml_get_available_memory();
     
-    // Fallback conditions:
-    // 1. Very low available memory (< 100MB)
-    // 2. Large buffer request (> 50MB) with limited memory
+    // Fallback conditions based on actual Whisper model requirements:
+    // 1. Very low available memory (< 500MB) - won't run any model well
+    // 2. Large model request with insufficient memory (need 3x safety factor)
     // 3. Unable to determine available memory
     
     if (available == 0) {
@@ -974,10 +974,23 @@ bool whisper_coreml_should_fallback_to_cpu(size_t buffer_size) {
         return true;
     }
     
-    if (buffer_size > LARGE_BUFFER_THRESHOLD && available < (buffer_size * 3)) {
-        NSLog(@"[CoreML Memory] FALLBACK: Large buffer with insufficient memory (%.2f MB buffer, %.2f MB available)",
-              buffer_size / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
-        return true;
+    // For models requiring > 1GB, use stricter memory validation
+    if (buffer_size > LARGE_MODEL_THRESHOLD) {
+        // Large models need 4x safety factor due to CoreML overhead
+        size_t required_with_safety = buffer_size * 4;
+        if (available < required_with_safety) {
+            NSLog(@"[CoreML Memory] FALLBACK: Large model insufficient memory (%.2f MB buffer needs %.2f MB with 4x safety, %.2f MB available)",
+                  buffer_size / (1024.0 * 1024.0), required_with_safety / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
+            return true;
+        }
+    } else {
+        // Smaller models use 3x safety factor
+        size_t required_with_safety = buffer_size * 3;
+        if (available < required_with_safety) {
+            NSLog(@"[CoreML Memory] FALLBACK: Model insufficient memory (%.2f MB buffer needs %.2f MB with 3x safety, %.2f MB available)",
+                  buffer_size / (1024.0 * 1024.0), required_with_safety / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
+            return true;
+        }
     }
     
     NSLog(@"[CoreML Memory] PROCEEDING: Memory sufficient (%.2f MB available, %.2f MB buffer)",

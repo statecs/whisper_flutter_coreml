@@ -30,9 +30,9 @@ class Whisper {
   // override of model download host
   final String? downloadHost;
 
-  /// Check available memory before processing using native FFI
-  Future<bool> _checkMemoryAvailable() async {
-    if (!Platform.isIOS) return true;
+  /// Get available memory in MB (iOS only)
+  Future<double> _getAvailableMemoryMB() async {
+    if (!Platform.isIOS) return 4096.0; // Assume 4GB on non-iOS
     
     try {
       final Map<String, dynamic> result = await _request(
@@ -42,16 +42,40 @@ class Whisper {
       final WhisperMemoryStatusResponse response = WhisperMemoryStatusResponse.fromJson(result);
       
       if (kDebugMode) {
-        debugPrint('[Whisper Memory] Available: ${response.availableMb.toStringAsFixed(1)} MB, Sufficient: ${response.sufficient}');
+        debugPrint('[Whisper Memory] Available: ${response.availableMb.toStringAsFixed(1)} MB');
       }
       
-      return response.sufficient;
+      return response.availableMb;
     } catch (e) {
       if (kDebugMode) {
-        debugPrint('[Whisper Memory] Error checking memory: $e');
+        debugPrint('[Whisper Memory] Error checking memory: $e - assuming 2GB available');
       }
-      return true; // Assume available if check fails
+      return 2048.0; // Conservative fallback
     }
+  }
+  
+  /// Select the best model that can run with available memory
+  Future<WhisperModel> _selectOptimalModel(WhisperModel requestedModel) async {
+    final double availableMemoryMB = await _getAvailableMemoryMB();
+    
+    // First check if the requested model can run
+    if (requestedModel.canRunWithMemory(availableMemoryMB)) {
+      if (kDebugMode) {
+        debugPrint('[Model Selection] Requested model ${requestedModel.modelName} can run with ${availableMemoryMB.toInt()}MB');
+      }
+      return requestedModel;
+    }
+    
+    // If not, find the best alternative
+    final optimizedModel = WhisperModel.getBestModelForMemory(availableMemoryMB);
+    
+    if (optimizedModel != requestedModel) {
+      if (kDebugMode) {
+        debugPrint('[Model Selection] Downgraded from ${requestedModel.modelName} to ${optimizedModel.modelName} due to memory constraints');
+      }
+    }
+    
+    return optimizedModel;
   }
 
   DynamicLibrary _openLib() {
@@ -72,26 +96,31 @@ class Whisper {
     return libraryDirectory.path;
   }
 
-  Future<void> _initModel() async {
+  Future<void> _initModel(WhisperModel modelToInit) async {
     final String modelDir = await _getModelDir();
-    final File modelFile = File(model.getPath(modelDir));
+    final File modelFile = File(modelToInit.getPath(modelDir));
     final bool isModelExist = modelFile.existsSync();
     if (isModelExist) {
       if (kDebugMode) {
-        debugPrint("Use existing model ${model.modelName}");
+        debugPrint("Use existing model ${modelToInit.modelName}");
       }
       return;
     } else {
+      if (kDebugMode) {
+        debugPrint("Downloading model ${modelToInit.modelName}...");
+      }
       await downloadModel(
-          model: model, destinationPath: modelDir, downloadHost: downloadHost);
+          model: modelToInit, destinationPath: modelDir, downloadHost: downloadHost);
     }
   }
 
   Future<Map<String, dynamic>> _request({
     required WhisperRequestDto whisperRequest,
+    WhisperModel? specificModel,
   }) async {
-    if (model != WhisperModel.none) {
-      await _initModel();
+    final modelToUse = specificModel ?? model;
+    if (modelToUse != WhisperModel.none) {
+      await _initModel(modelToUse);
     }
     return Isolate.run(
       () async {
@@ -118,19 +147,18 @@ class Whisper {
   Future<WhisperTranscribeResponse> transcribe({
     required TranscribeRequest transcribeRequest,
   }) async {
-    // Check memory availability before processing (iOS only) - MUST be done in main isolate
-    if (!await _checkMemoryAvailable()) {
-      throw Exception('Insufficient memory available for transcription. Please close other apps and try again.');
-    }
+    // Select optimal model based on available memory - MUST be done in main isolate
+    final optimalModel = await _selectOptimalModel(model);
     
     final String modelDir = await _getModelDir();
     
-    // Note: Background isolate cannot access method channels, so memory check is done above
+    // Note: Background isolate cannot access method channels, so model selection is done above
     final Map<String, dynamic> result = await _request(
       whisperRequest: TranscribeRequestDto.fromTranscribeRequest(
         transcribeRequest,
-        model.getPath(modelDir),
+        optimalModel.getPath(modelDir),
       ),
+      specificModel: optimalModel,
     );
     if (kDebugMode) {
       debugPrint("Transcribe request $result");

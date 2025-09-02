@@ -15,14 +15,14 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
   final Ref ref;
 
   Future<void> transcribe(String filePath) async {
-    final WhisperModel model = ref.read(modelProvider);
+    final WhisperModel requestedModel = ref.read(modelProvider);
 
     state = const AsyncLoading();
 
     /// China: https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main
     /// Other: https://huggingface.co/ggerganov/whisper.cpp/resolve/main
     final Whisper whisper = Whisper(
-        model: model,
+        model: requestedModel,
         downloadHost:
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main");
 
@@ -38,8 +38,9 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
 
     try {
       if (kDebugMode) {
-        debugPrint("[Whisper]Start");
+        debugPrint("[Whisper] Starting transcription with requested model: ${requestedModel.modelName}");
       }
+      
       final String? whisperVersion = await whisper.getVersion();
       var cores = 2;
       try {
@@ -47,10 +48,16 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
       } catch (_) {
         cores = 8;
       }
+      
+      // Optimize thread count for mobile devices to prevent memory issues
+      final int optimizedThreads = cores <= 4 ? cores : (cores * 0.75).ceil();
+      final int optimizedProcessors = optimizedThreads;
+      
       if (kDebugMode) {
-        debugPrint("[Whisper]Number of core = ${cores}");
-        debugPrint("[Whisper]Whisper version = $whisperVersion");
+        debugPrint("[Whisper] Device cores: $cores, optimized threads: $optimizedThreads");
+        debugPrint("[Whisper] Whisper version: $whisperVersion");
       }
+      
       final Directory documentDirectory =
           await getApplicationDocumentsDirectory();
       final WhisperAudioconvert converter = WhisperAudioconvert(
@@ -63,8 +70,8 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
         transcribeRequest: TranscribeRequest(
           audio: convertedFile?.path ?? filePath,
           language: lang,
-          nProcessors: (cores * 1.2).toInt(),
-          threads: (cores * 1.2).toInt(),
+          nProcessors: optimizedProcessors,
+          threads: optimizedThreads,
           isTranslate: translate,
           isNoTimestamps: !withSegments,
           splitOnWord: splitWords,
@@ -73,8 +80,10 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
 
       final Duration transcriptionDuration = DateTime.now().difference(start);
       if (kDebugMode) {
-        debugPrint("[Whisper]End = $transcriptionDuration");
+        debugPrint("[Whisper] Transcription completed in $transcriptionDuration");
+        debugPrint("[Whisper] Text length: ${transcription.text.length} characters");
       }
+      
       state = AsyncData(
         TranscribeResult(
           time: transcriptionDuration,
@@ -83,8 +92,16 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
       );
     } catch (e) {
       if (kDebugMode) {
-        debugPrint("[Whisper]Error = $e");
+        debugPrint("[Whisper] Transcription error: $e");
       }
+      
+      // Check if this is a memory-related error and provide helpful message
+      if (e.toString().contains('memory') || e.toString().contains('Memory')) {
+        if (kDebugMode) {
+          debugPrint("[Whisper] Memory-related error detected - automatic model downgrade should have prevented this");
+        }
+      }
+      
       state = const AsyncData(null);
     }
   }
