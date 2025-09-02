@@ -4,14 +4,14 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'whisper_flutter_coreml'
-  s.version          = '0.0.1'
+  s.version          = '1.0.1'
   s.summary          = 'A Flutter FFI plugin for Whisper.cpp.'
   s.description      = <<-DESC
 A Flutter FFI plugin for Whisper.cpp.
                        DESC
-  s.homepage         = 'https://www.xcl.ink'
+  s.homepage         = 'https://cstate.se'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { '田梓萱' => 'zixuanxcl@gmail.com' }
+  s.author           = { 'statecs' => 'hello@cstate.se' }
   s.source           = { :path => '.' }
 
   # This will ensure the source files in Classes/ are included in the native
@@ -27,7 +27,7 @@ A Flutter FFI plugin for Whisper.cpp.
   # Flutter.framework does not contain a i386 slice.
   s.xcconfig = {
       'CLANG_CXX_LANGUAGE_STANDARD' => 'c++20',
-      'GCC_PREPROCESSOR_DEFINITIONS' => 'WHISPER_USE_COREML=1 NDEBUG=1',
+      'GCC_PREPROCESSOR_DEFINITIONS' => 'WHISPER_USE_COREML=1 WHISPER_COREML_ALLOW_FALLBACK=1 NDEBUG=1',
       'CLANG_ENABLE_OBJC_ARC' => 'YES',
   }
   s.library = 'c++'

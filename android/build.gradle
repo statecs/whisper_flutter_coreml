@@ -36,7 +36,7 @@ android {
     if (project.android.hasProperty("namespace")) {
         namespace "com.devac.whisper_flutter_coreml"
     }
-    ndkVersion "27.0.11902837"
+    ndkVersion "26.1.10909125"
 
     compileSdk 34
 
