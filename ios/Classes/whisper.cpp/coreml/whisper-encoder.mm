@@ -743,16 +743,87 @@ int whisper_coreml_encode_with_dims(
                         }
                         
                         for (NSInteger state = 0; state < copyNState; state++) {
-                            // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
-                            NSInteger srcIdx = (0 * modelNState * 1 * modelNCtx) + 
-                                             (state * 1 * modelNCtx) + 
-                                             (0 * modelNCtx) + ctx;
+                            // CoreML 4D tensor layout with stride padding: [batch=1, state, height=1, ctx]
+                            // Use actual stride values to handle padding correctly
+                            NSInteger srcIdx;
+                            if (outputStrides.count >= 4) {
+                                // Use actual stride values from CoreML to handle padding
+                                // Shape: (1, 768, 1, 1500), Strides: (1155072, 1504, 1504, 1)
+                                NSInteger strideBatch = outputStrides[0].integerValue;  // 1155072
+                                NSInteger strideState = outputStrides[1].integerValue;  // 1504 
+                                NSInteger strideHeight = outputStrides[2].integerValue; // 1504
+                                NSInteger strideCtx = outputStrides[3].integerValue;    // 1
+                                
+                                srcIdx = (0 * strideBatch) +    // batch=0
+                                        (state * strideState) + // state dimension with padding
+                                        (0 * strideHeight) +    // height=0
+                                        (ctx * strideCtx);      // ctx dimension
+                                        
+                                // Debug: Log index calculation for first few elements
+                                if (ctx < 3 && state < 3) {
+                                    NSLog(@"[CoreML] Index calc: state=%ld, ctx=%ld -> srcIdx=%ld (strides: %ld,%ld,%ld,%ld)", 
+                                          (long)state, (long)ctx, (long)srcIdx,
+                                          (long)strideBatch, (long)strideState, (long)strideHeight, (long)strideCtx);
+                                }
+                            } else {
+                                // Fallback to logical layout if stride info unavailable  
+                                srcIdx = state * modelNCtx + ctx;
+                                
+                                if (ctx < 3 && state < 3) {
+                                    NSLog(@"[CoreML] Fallback index calc: state=%ld, ctx=%ld -> srcIdx=%ld", 
+                                          (long)state, (long)ctx, (long)srcIdx);
+                                }
+                            }
                             
-                            // Bounds checking
+                            // Bounds checking with data type awareness
                             if (srcIdx >= 0 && srcIdx < outputElements) {
-                                // Extract value from CoreML output
-                                float *f32Data = (float*)outputArray.dataPointer;
-                                float srcValue = f32Data[srcIdx];
+                                float srcValue = 0.0f;
+                                
+                                // Extract value from CoreML output based on data type
+                                if (needsConversion && outputArray.dataType == MLMultiArrayDataTypeFloat16) {
+                                    // Handle Float16 data (2 bytes per element)
+                                    uint16_t *f16Data = (uint16_t*)outputArray.dataPointer;
+                                    
+                                    // Additional bounds check for Float16 data
+                                    if (srcIdx < actualMemoryElements) {
+                                        uint16_t f16Value = f16Data[srcIdx];
+                                        
+                                        // Convert Float16 to Float32 using CoreFoundation
+                                        // Float16 format: 1 sign bit + 5 exp bits + 10 mantissa bits
+                                        if (f16Value == 0x0000) {
+                                            srcValue = 0.0f;  // +0
+                                        } else if (f16Value == 0x8000) {
+                                            srcValue = -0.0f; // -0
+                                        } else {
+                                            // Extract components
+                                            uint32_t sign = (f16Value >> 15) & 0x1;
+                                            uint32_t exp16 = (f16Value >> 10) & 0x1F;
+                                            uint32_t mant16 = f16Value & 0x3FF;
+                                            
+                                            if (exp16 == 0) {
+                                                // Subnormal number
+                                                srcValue = (sign ? -1.0f : 1.0f) * (mant16 / 1024.0f) * powf(2.0f, -14.0f);
+                                            } else if (exp16 == 31) {
+                                                // Infinity or NaN
+                                                srcValue = (mant16 == 0) ? (sign ? -INFINITY : INFINITY) : NAN;
+                                            } else {
+                                                // Normal number: convert to Float32
+                                                uint32_t exp32 = exp16 - 15 + 127; // Convert bias from 15 to 127
+                                                uint32_t mant32 = mant16 << 13; // Extend mantissa from 10 to 23 bits
+                                                uint32_t f32bits = (sign << 31) | (exp32 << 23) | mant32;
+                                                srcValue = *((float*)&f32bits);
+                                            }
+                                        }
+                                    } else {
+                                        NSLog(@"[CoreML] WARNING: Float16 srcIdx %ld >= actualMemoryElements %ld - using 0.0", 
+                                              (long)srcIdx, (long)actualMemoryElements);
+                                        srcValue = 0.0f;
+                                    }
+                                } else {
+                                    // Handle Float32 data (4 bytes per element) - existing logic
+                                    float *f32Data = (float*)outputArray.dataPointer;
+                                    srcValue = f32Data[srcIdx];
+                                }
                                 
                                 // Copy to whisper buffer using stride
                                 char *ggmlData = (char*)out;
