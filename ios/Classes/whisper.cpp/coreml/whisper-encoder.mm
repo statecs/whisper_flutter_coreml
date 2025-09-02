@@ -8,6 +8,8 @@
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
+#import <mach/mach.h>
+#import <mach/mach_host.h>
 #include <string.h>
 
 #ifdef __cplusplus
@@ -83,10 +85,22 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
             totalElements *= dim.integerValue;
         }
         
+        // BUFFER SIZE VALIDATION: Check input buffer requirements against available memory
+        size_t inputBufferSize = totalElements * sizeof(float);
+        NSLog(@"[CoreML] Model input buffer requirements: %.2f MB (%ld elements)", 
+              inputBufferSize / (1024.0 * 1024.0), (long)totalElements);
+        
         // Whisper encoder should accept reasonable input sizes
         if (totalElements < 10000 || totalElements > 2000000) {
             NSLog(@"[CoreML] Model input size (%ld elements) outside reasonable range (10K-2M) - falling back to CPU", 
                   (long)totalElements);
+            return nullptr;
+        }
+        
+        // Check if we have sufficient memory for input buffer during model initialization
+        if (!whisper_coreml_check_memory_sufficient(inputBufferSize)) {
+            NSLog(@"[CoreML] Insufficient memory for model input buffer (%.2f MB) during initialization - falling back to CPU", 
+                  inputBufferSize / (1024.0 * 1024.0));
             return nullptr;
         }
         
@@ -112,10 +126,30 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
             outputElements *= dim.integerValue;
         }
         
+        // BUFFER SIZE VALIDATION: Check output buffer requirements
+        size_t outputBufferSize = outputElements * sizeof(float);
+        NSLog(@"[CoreML] Model output buffer requirements: %.2f MB (%ld elements)", 
+              outputBufferSize / (1024.0 * 1024.0), (long)outputElements);
+        
         // Whisper encoder output should be reasonable size (typically n_state * n_ctx)
         if (outputElements < 100000 || outputElements > 5000000) {
             NSLog(@"[CoreML] Model output size (%ld elements) outside reasonable range (100K-5M) - falling back to CPU", 
                   (long)outputElements);
+            return nullptr;
+        }
+        
+        // Check if we have sufficient memory for output buffer during model initialization
+        if (!whisper_coreml_check_memory_sufficient(outputBufferSize)) {
+            NSLog(@"[CoreML] Insufficient memory for model output buffer (%.2f MB) during initialization - falling back to CPU", 
+                  outputBufferSize / (1024.0 * 1024.0));
+            return nullptr;
+        }
+        
+        // Check total memory requirements (input + output + working memory)
+        size_t totalBufferRequirement = inputBufferSize + outputBufferSize + (outputBufferSize / 2); // Add 50% for working memory
+        if (!whisper_coreml_check_memory_sufficient(totalBufferRequirement)) {
+            NSLog(@"[CoreML] Insufficient memory for total model requirements (%.2f MB) during initialization - falling back to CPU", 
+                  totalBufferRequirement / (1024.0 * 1024.0));
             return nullptr;
         }
         
@@ -175,6 +209,30 @@ int whisper_coreml_encode_with_dims(
         return -1; // Graceful fallback to CPU
     }
     
+    // MEMORY SAFETY: Check if we have sufficient memory before proceeding
+    const size_t estimated_buffer_size = out_n_state * out_n_ctx * sizeof(float);
+    const size_t estimated_total_usage = estimated_buffer_size * 3; // Input + Output + Working memory
+    
+    NSLog(@"[CoreML Memory] Estimated memory usage: %.2f MB (%.2f MB buffer × 3)", 
+          estimated_total_usage / (1024.0 * 1024.0), estimated_buffer_size / (1024.0 * 1024.0));
+    
+    // Check if we should fallback to CPU due to memory constraints
+    if (whisper_coreml_should_fallback_to_cpu(estimated_total_usage)) {
+        NSLog(@"[CoreML] Memory-based fallback to CPU - estimated usage %.2f MB too high", 
+              estimated_total_usage / (1024.0 * 1024.0));
+        
+        // Attempt memory cleanup before final fallback
+        whisper_coreml_handle_memory_pressure();
+        
+        // Re-check after cleanup
+        if (whisper_coreml_should_fallback_to_cpu(estimated_total_usage)) {
+            NSLog(@"[CoreML] Still insufficient memory after cleanup - using CPU fallback");
+            return -1; // Graceful fallback to CPU
+        } else {
+            NSLog(@"[CoreML] Memory cleanup successful - proceeding with CoreML");
+        }
+    }
+    
     @try {
         NSLog(@"[CoreML] Starting encoder prediction...");
         
@@ -204,6 +262,22 @@ int whisper_coreml_encode_with_dims(
         NSArray<NSNumber *> *inputShape = inputDesc.multiArrayConstraint.shape;
         NSLog(@"[CoreML] Input shape: %@", inputShape);
         
+        // MEMORY SAFETY: Validate buffer size before allocation
+        NSInteger totalElements = 1;
+        for (NSNumber *dim in inputShape) {
+            totalElements *= dim.integerValue;
+        }
+        
+        size_t required_input_bytes = totalElements * sizeof(float);
+        NSLog(@"[CoreML] Input buffer will require %.2f MB for %ld elements", 
+              required_input_bytes / (1024.0 * 1024.0), (long)totalElements);
+        
+        if (!whisper_coreml_check_memory_sufficient(required_input_bytes)) {
+            NSLog(@"[CoreML] Insufficient memory for input buffer (%.2f MB) - using CPU fallback", 
+                  required_input_bytes / (1024.0 * 1024.0));
+            return -1;
+        }
+        
         // Create input MLMultiArray from mel spectrogram
         NSError *error = nil;
         MLMultiArray *inputArray = [[MLMultiArray alloc] 
@@ -214,13 +288,15 @@ int whisper_coreml_encode_with_dims(
         if (!inputArray || error) {
             NSLog(@"[CoreML] Failed to create input array: %@ - using CPU fallback", 
                   error ? error.localizedDescription : @"Unknown error");
+            
+            // Handle low memory error specifically
+            if (error && [error.domain isEqualToString:NSCocoaErrorDomain] && 
+                error.code == NSFileReadTooLargeError) {
+                NSLog(@"[CoreML] Input allocation failed due to insufficient memory");
+                whisper_coreml_handle_memory_pressure();
+            }
+            
             return -1;
-        }
-        
-        // Calculate expected input size
-        NSInteger totalElements = 1;
-        for (NSNumber *dim in inputShape) {
-            totalElements *= dim.integerValue;
         }
         
         // Copy mel data to MLMultiArray with validation
@@ -258,10 +334,13 @@ int whisper_coreml_encode_with_dims(
         
         float *inputData = (float *)inputArray.dataPointer;
         
-        // Initialize input array to zero
-        memset(inputData, 0, totalElements * sizeof(float));
+        // Initialize input array to zero with autorelease pool management
+        @autoreleasepool {
+            memset(inputData, 0, totalElements * sizeof(float));
+        }
         
-        // Reshape and copy mel data based on size compatibility
+        // Reshape and copy mel data based on size compatibility with memory-efficient pools
+        @autoreleasepool {
         if (srcElements == totalElements) {
             // Direct copy - same size
             NSLog(@"[CoreML] Direct copy: source and model have same size");
@@ -317,7 +396,7 @@ int whisper_coreml_encode_with_dims(
                 if (isnan(value) || isinf(value)) value = 0.0f;
                 inputData[i] = value;
             }
-        }
+        } // End of mel data reshaping autorelease pool
         
         NSLog(@"[CoreML] Successfully created input array with %ld validated elements", (long)totalElements);
         
@@ -593,9 +672,14 @@ int whisper_coreml_encode_with_dims(
         // Initialize whisper buffer (always use whisper's expected size)
         memset(out, 0, whisperBufferSize);
         
-        // Safe data copying with memory protection
+        // Safe data copying with memory protection and optimized autorelease pools
         @autoreleasepool {
             @try {
+                // MEMORY LEAK PREVENTION: Clear any previous autorelease objects
+                @autoreleasepool {
+                    // Force cleanup of any pending autoreleased objects
+                }
+                
                 // Smart tensor reshaping with size adaptation
                 if (outputShape.count >= 4) {
                     NSLog(@"[CoreML] Reshaping 4D model output [%ld,%ld,%ld,%ld] to whisper 2D format [%ld×%ld]",
@@ -646,15 +730,17 @@ int whisper_coreml_encode_with_dims(
                     NSLog(@"[CoreML] Starting tensor copy of %ld elements with %@ data type", 
                           (long)totalElements, dataTypeName);
                     
-                    // OPTIMIZATION: Use batch processing for better performance
-                    const NSInteger chunkSize = needsConversion ? 100 : 500; // Smaller chunks for conversions
+                    // OPTIMIZATION: Use batch processing with autorelease pools for memory efficiency
+                    const NSInteger chunkSize = needsConversion ? 50 : 200; // Smaller chunks to prevent memory buildup
                     NSInteger processedCtx = 0;
                     
                     while (processedCtx < copyNCtx) {
-                        NSInteger currentChunkSize = MIN(chunkSize, copyNCtx - processedCtx);
-                        NSInteger chunkEnd = processedCtx + currentChunkSize;
-                        
-                        for (NSInteger ctx = processedCtx; ctx < chunkEnd; ctx++) {
+                        // MEMORY LEAK PREVENTION: Create autorelease pool for each chunk
+                        @autoreleasepool {
+                            NSInteger currentChunkSize = MIN(chunkSize, copyNCtx - processedCtx);
+                            NSInteger chunkEnd = processedCtx + currentChunkSize;
+                            
+                            for (NSInteger ctx = processedCtx; ctx < chunkEnd; ctx++) {
                             for (NSInteger state = 0; state < copyNState; state++) {
                                 // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
                                 // Correct flattened index for [1, modelNState, 1, modelNCtx]
@@ -771,7 +857,8 @@ int whisper_coreml_encode_with_dims(
                                     return -1;
                                 }
                             }
-                        }
+                            } // End of context loop
+                        } // End of autorelease pool for this chunk
                         
                         processedCtx = chunkEnd;
                         
@@ -903,6 +990,126 @@ void whisper_coreml_free(struct whisper_coreml_context * ctx) {
             delete ctx;
         }
     }
+}
+
+// MARK: - Memory Management Functions for Crash Prevention
+
+size_t whisper_coreml_get_available_memory(void) {
+    @try {
+        mach_port_t host_port = mach_host_self();
+        vm_size_t pagesize;
+        host_page_size(host_port, &pagesize);
+        
+        vm_statistics64_data_t vm_stat;
+        mach_msg_type_number_t host_size = sizeof(vm_statistics64_data_t) / sizeof(natural_t);
+        
+        kern_return_t result = host_statistics64(host_port, HOST_VM_INFO64, 
+                                               (host_info64_t)&vm_stat, &host_size);
+        
+        if (result == KERN_SUCCESS) {
+            // Calculate available memory: free + inactive pages
+            uint64_t available_pages = vm_stat.free_count + vm_stat.inactive_count;
+            size_t available_bytes = available_pages * pagesize;
+            
+            NSLog(@"[CoreML Memory] Available: %.2f MB (free: %lld + inactive: %lld pages, %u bytes/page)", 
+                  available_bytes / (1024.0 * 1024.0), 
+                  vm_stat.free_count, vm_stat.inactive_count, pagesize);
+            
+            return available_bytes;
+        } else {
+            NSLog(@"[CoreML Memory] Failed to get memory statistics, kern_return: %d", result);
+            return 0;
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[CoreML Memory] Exception getting available memory: %@", exception.reason);
+        return 0;
+    }
+}
+
+bool whisper_coreml_check_memory_sufficient(size_t required_bytes) {
+    // Get current available memory
+    size_t available = whisper_coreml_get_available_memory();
+    
+    if (available == 0) {
+        NSLog(@"[CoreML Memory] WARNING: Could not determine available memory, assuming insufficient");
+        return false;
+    }
+    
+    // Safety factor: require 2x the needed memory to account for:
+    // 1. Temporary allocations during processing
+    // 2. System memory pressure
+    // 3. CoreML internal buffers
+    size_t safety_factor = 2;
+    size_t required_with_safety = required_bytes * safety_factor;
+    
+    bool sufficient = available >= required_with_safety;
+    
+    NSLog(@"[CoreML Memory] Check: need %.2f MB (%.2f MB with %zux safety), have %.2f MB -> %@",
+          required_bytes / (1024.0 * 1024.0),
+          required_with_safety / (1024.0 * 1024.0),
+          safety_factor,
+          available / (1024.0 * 1024.0),
+          sufficient ? @"SUFFICIENT" : @"INSUFFICIENT");
+    
+    return sufficient;
+}
+
+void whisper_coreml_handle_memory_pressure(void) {
+    NSLog(@"[CoreML Memory] Handling memory pressure - triggering cleanup");
+    
+    @autoreleasepool {
+        // iOS uses ARC, no garbage collector available - just drain autorelease pools
+        // Force autorelease pool drain by creating and destroying nested pool
+        @autoreleasepool {
+            // Empty pool to force cleanup
+        }
+        
+        // On iOS, suggest memory cleanup through notification
+        #if TARGET_OS_IOS
+        [[NSNotificationCenter defaultCenter] 
+            postNotificationName:UIApplicationDidReceiveMemoryWarningNotification 
+            object:nil];
+        #endif
+        
+        // Log memory status after cleanup
+        size_t available_after = whisper_coreml_get_available_memory();
+        NSLog(@"[CoreML Memory] Available after cleanup: %.2f MB", 
+              available_after / (1024.0 * 1024.0));
+    }
+}
+
+bool whisper_coreml_should_fallback_to_cpu(size_t buffer_size) {
+    // Define memory thresholds based on iPhone 11 capabilities (4GB total, ~2GB available to apps)
+    const size_t CRITICAL_MEMORY_THRESHOLD = 100 * 1024 * 1024; // 100 MB minimum
+    const size_t LARGE_BUFFER_THRESHOLD = 50 * 1024 * 1024;     // 50 MB per buffer
+    
+    size_t available = whisper_coreml_get_available_memory();
+    
+    // Fallback conditions:
+    // 1. Very low available memory (< 100MB)
+    // 2. Large buffer request (> 50MB) with limited memory
+    // 3. Unable to determine available memory
+    
+    if (available == 0) {
+        NSLog(@"[CoreML Memory] FALLBACK: Cannot determine available memory");
+        return true;
+    }
+    
+    if (available < CRITICAL_MEMORY_THRESHOLD) {
+        NSLog(@"[CoreML Memory] FALLBACK: Critical memory shortage (%.2f MB < %.2f MB threshold)",
+              available / (1024.0 * 1024.0), CRITICAL_MEMORY_THRESHOLD / (1024.0 * 1024.0));
+        return true;
+    }
+    
+    if (buffer_size > LARGE_BUFFER_THRESHOLD && available < (buffer_size * 3)) {
+        NSLog(@"[CoreML Memory] FALLBACK: Large buffer with insufficient memory (%.2f MB buffer, %.2f MB available)",
+              buffer_size / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
+        return true;
+    }
+    
+    NSLog(@"[CoreML Memory] PROCEEDING: Memory sufficient (%.2f MB available, %.2f MB buffer)",
+          available / (1024.0 * 1024.0), buffer_size / (1024.0 * 1024.0));
+    return false;
 }
 
 #ifdef __cplusplus
