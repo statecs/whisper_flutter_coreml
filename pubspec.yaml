@@ -3,7 +3,7 @@ description: A flutter library for offline speech-to-text conversion which use w
 version: 1.0.1
 repository: https://github.com/statecs/whisper_flutter_coreml
 issue_tracker: https://github.com/statecs/whisper_flutter_coreml/issues
-homepage: https://github.com/statecs/whisper_flutter_coreml
+homepage: https://pub.dev/packages/whisper_flutter_coreml
 
 platforms:
   android:

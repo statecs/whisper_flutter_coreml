@@ -8,9 +8,9 @@ and Android
 2. Support Android 5.0+ & iOS 13+ & MacOS 11+
 3. It is optimized and fast
 
-Supported models: tiny、base、small、medium、large-v1、large-v2
+Supported models: tiny、base、small、medium、large-v1、large-v2, large-v3-turbo
 
-Recommended Models：base、small、medium
+Recommended Models：base、small、medium, turbo
 
 All models have been actually tested, test devices: Android: Google Pixel 7 Pro, iOS: M1 iOS
 simulator，MacOS: M1 MacBookPro & M2 MacMini
