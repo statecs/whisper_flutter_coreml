@@ -1,5 +1,6 @@
 #include "whisper_flutter_coreml.h"
 #include "whisper.cpp/whisper.h"
+#include "whisper.cpp/coreml/whisper-encoder.h"
 
 #define DR_WAV_IMPLEMENTATION
 #include "whisper.cpp/examples/dr_wav.h"
