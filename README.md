@@ -43,11 +43,16 @@ import 'package:whisper_flutter_coreml/whisper_flutter_coreml.dart';
 - Apple Silicon device (M1, M2, M3, or newer recommended)
 - CoreML model files (`.mlmodelc` format)
 
-### CoreML Model Generation
+### CoreML Model Auto-Download
 
-To use CoreML acceleration, you'll need to generate CoreML models from your Whisper models. The models will automatically fallback to CPU execution if CoreML models are not available.
+**New in v1.0.3:** CoreML models are now automatically downloaded alongside regular Whisper models when available. No additional setup is required!
 
-> **Note**: CoreML model generation requires a separate setup process. The first run with CoreML may be slower as the Apple Neural Engine compiles the model for your specific device.
+- CoreML models are automatically downloaded on iOS/macOS when initializing a Whisper model
+- If a CoreML model is not available for a specific model size, the system gracefully falls back to CPU processing
+- You can check CoreML availability using `await whisper.hasCoreMLSupport()`
+- The first run with CoreML may be slower as the Apple Neural Engine compiles the model for your specific device
+
+> **Note**: CoreML models are larger than regular models (e.g., small model: ~466MB + ~163MB CoreML), but provide significant performance improvements on Apple Silicon devices.
 
 ## Quickstart
 
@@ -72,6 +77,10 @@ final Whisper whisper = Whisper(
 
 final String? whisperVersion = await whisper.getVersion();
 print(whisperVersion);
+
+// Check if CoreML hardware acceleration is available
+final bool hasCoreMLSupport = await whisper.hasCoreMLSupport();
+print('CoreML Support: ${hasCoreMLSupport ? 'Available' : 'CPU fallback'}');
 
 final String transcription = await whisper.transcribe(
     transcribeRequest: TranscribeRequest(

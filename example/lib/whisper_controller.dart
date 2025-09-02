@@ -42,6 +42,8 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
       }
       
       final String? whisperVersion = await whisper.getVersion();
+      final bool hasCoreMLSupport = await whisper.hasCoreMLSupport();
+      
       var cores = 2;
       try {
         cores = SysInfo.cores.length;
@@ -56,6 +58,7 @@ class WhisperController extends StateNotifier<AsyncValue<TranscribeResult?>> {
       if (kDebugMode) {
         debugPrint("[Whisper] Device cores: $cores, optimized threads: $optimizedThreads");
         debugPrint("[Whisper] Whisper version: $whisperVersion");
+        debugPrint("[Whisper] CoreML support: ${hasCoreMLSupport ? 'Available' : 'Not available (CPU fallback)'}");
       }
       
       final Directory documentDirectory =

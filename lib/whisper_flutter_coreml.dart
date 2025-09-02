@@ -100,9 +100,11 @@ class Whisper {
     final String modelDir = await _getModelDir();
     final File modelFile = File(modelToInit.getPath(modelDir));
     final bool isModelExist = modelFile.existsSync();
+    
     if (isModelExist) {
       if (kDebugMode) {
-        debugPrint("Use existing model ${modelToInit.modelName}");
+        final bool hasCoreML = modelToInit.hasCoreMLModel(modelDir);
+        debugPrint("Use existing model ${modelToInit.modelName} ${hasCoreML ? '(CoreML available)' : '(CPU only)'}");
       }
       return;
     } else {
@@ -110,7 +112,10 @@ class Whisper {
         debugPrint("Downloading model ${modelToInit.modelName}...");
       }
       await downloadModel(
-          model: modelToInit, destinationPath: modelDir, downloadHost: downloadHost);
+          model: modelToInit, 
+          destinationPath: modelDir, 
+          downloadHost: downloadHost,
+          downloadCoreML: Platform.isIOS || Platform.isMacOS);
     }
   }
 
@@ -182,5 +187,13 @@ class Whisper {
       result,
     );
     return response.message;
+  }
+
+  /// Check if CoreML model is available for hardware acceleration
+  Future<bool> hasCoreMLSupport() async {
+    if (!Platform.isIOS && !Platform.isMacOS) return false;
+    
+    final String modelDir = await _getModelDir();
+    return model.hasCoreMLModel(modelDir);
   }
 }
