@@ -50,19 +50,21 @@ enum WhisperModel {
   }
   
   /// Check if this model can run with available memory (MB)
-  bool canRunWithMemory(double availableMemoryMB) {
+  /// [hasCoreML] indicates if CoreML hardware acceleration is available
+  bool canRunWithMemory(double availableMemoryMB, {bool hasCoreML = false}) {
     if (this == WhisperModel.none) return true;
-    
-    // Use 3x safety factor to account for:
-    // 1. Model loading overhead
-    // 2. Input/output buffers
-    // 3. System memory pressure protection
-    final requiredWithSafety = memoryRequirementMB * 3.0;
-    
+
+    // Use different safety factors based on acceleration:
+    // - CoreML: 1.5x safety (models are memory-mapped, use Neural Engine/GPU)
+    // - CPU: 3.0x safety (full model loaded in RAM, higher overhead)
+    final safetyFactor = hasCoreML ? 1.5 : 3.0;
+    final requiredWithSafety = memoryRequirementMB * safetyFactor;
+
     if (kDebugMode) {
-      debugPrint('[Memory Check] Model ${modelName}: requires ${memoryRequirementMB}MB (${requiredWithSafety.toInt()}MB with 3x safety), available: ${availableMemoryMB.toInt()}MB');
+      final mode = hasCoreML ? 'CoreML' : 'CPU';
+      debugPrint('[Memory Check] Model $modelName ($mode): requires ${memoryRequirementMB}MB (${requiredWithSafety.toInt()}MB with ${safetyFactor}x safety), available: ${availableMemoryMB.toInt()}MB');
     }
-    
+
     return availableMemoryMB >= requiredWithSafety;
   }
   
@@ -77,27 +79,29 @@ enum WhisperModel {
   }
   
   /// Get the best model that can run with available memory
-  static WhisperModel getBestModelForMemory(double availableMemoryMB) {
+  /// [hasCoreML] indicates if CoreML hardware acceleration is available
+  static WhisperModel getBestModelForMemory(double availableMemoryMB, {bool hasCoreML = false}) {
     // Try models in order of preference (quality)
     final modelsInPreferenceOrder = [
       WhisperModel.turbo,
-      WhisperModel.largeV2, 
+      WhisperModel.largeV2,
       WhisperModel.largeV1,
       WhisperModel.medium,
       WhisperModel.small,
       WhisperModel.base,
       WhisperModel.tiny,
     ];
-    
+
     for (final model in modelsInPreferenceOrder) {
-      if (model.canRunWithMemory(availableMemoryMB)) {
+      if (model.canRunWithMemory(availableMemoryMB, hasCoreML: hasCoreML)) {
         if (kDebugMode) {
-          debugPrint('[Memory Selection] Selected model: ${model.modelName} (requires ${model.memoryRequirementMB}MB)');
+          final mode = hasCoreML ? 'CoreML' : 'CPU';
+          debugPrint('[Memory Selection] Selected model: ${model.modelName} ($mode, requires ${model.memoryRequirementMB}MB)');
         }
         return model;
       }
     }
-    
+
     if (kDebugMode) {
       debugPrint('[Memory Selection] No model fits in ${availableMemoryMB.toInt()}MB - using tiny as last resort');
     }

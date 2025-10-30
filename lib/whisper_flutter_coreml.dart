@@ -57,24 +57,36 @@ class Whisper {
   /// Select the best model that can run with available memory
   Future<WhisperModel> _selectOptimalModel(WhisperModel requestedModel) async {
     final double availableMemoryMB = await _getAvailableMemoryMB();
-    
+    final String modelDirPath = await _getModelDir();
+
+    // Check if CoreML is available for the requested model
+    final bool hasCoreML = requestedModel.hasCoreMLModel(modelDirPath);
+
+    if (kDebugMode) {
+      debugPrint('[Model Selection] Checking ${requestedModel.modelName} with ${hasCoreML ? "CoreML" : "CPU"} mode');
+    }
+
     // First check if the requested model can run
-    if (requestedModel.canRunWithMemory(availableMemoryMB)) {
+    if (requestedModel.canRunWithMemory(availableMemoryMB, hasCoreML: hasCoreML)) {
       if (kDebugMode) {
         debugPrint('[Model Selection] Requested model ${requestedModel.modelName} can run with ${availableMemoryMB.toInt()}MB');
       }
       return requestedModel;
     }
-    
-    // If not, find the best alternative
-    final optimizedModel = WhisperModel.getBestModelForMemory(availableMemoryMB);
-    
+
+    // If not, find the best alternative (assume CoreML available for all if platform supports it)
+    final bool platformSupportsCoreML = Platform.isIOS || Platform.isMacOS;
+    final optimizedModel = WhisperModel.getBestModelForMemory(
+      availableMemoryMB,
+      hasCoreML: platformSupportsCoreML,
+    );
+
     if (optimizedModel != requestedModel) {
       if (kDebugMode) {
         debugPrint('[Model Selection] Downgraded from ${requestedModel.modelName} to ${optimizedModel.modelName} due to memory constraints');
       }
     }
-    
+
     return optimizedModel;
   }
 
