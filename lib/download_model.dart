@@ -7,7 +7,6 @@
  */
 
 import "dart:io";
-import "dart:typed_data";
 
 import "package:flutter/foundation.dart";
 import "package:archive/archive.dart";
@@ -55,9 +54,9 @@ enum WhisperModel {
     if (this == WhisperModel.none) return true;
 
     // Use different safety factors based on acceleration:
-    // - CoreML: 1.5x safety (models are memory-mapped, use Neural Engine/GPU)
+    // - CoreML: 1.2x safety (models are memory-mapped, use Neural Engine/GPU, minimal overhead)
     // - CPU: 3.0x safety (full model loaded in RAM, higher overhead)
-    final safetyFactor = hasCoreML ? 1.5 : 3.0;
+    final safetyFactor = hasCoreML ? 1.2 : 3.0;
     final requiredWithSafety = memoryRequirementMB * safetyFactor;
 
     if (kDebugMode) {
@@ -245,34 +244,36 @@ Future<void> _downloadCoreMLModel({
           : model == WhisperModel.small ? 150
           : 500;
 
-      // Get free space using df command
-      try {
-        final result = await Process.run('df', ['-k', destinationPath]);
-        if (result.exitCode == 0) {
-          final lines = (result.stdout as String).split('\n');
-          if (lines.length > 1) {
-            final parts = lines[1].split(RegExp(r'\s+'));
-            if (parts.length >= 4) {
-              final freeSpaceKB = int.tryParse(parts[3]) ?? 0;
-              final freeSpaceMB = freeSpaceKB / 1024;
+      // Get free space using df command (skip on iOS where Process.run is not supported)
+      if (!Platform.isIOS) {
+        try {
+          final result = await Process.run('df', ['-k', destinationPath]);
+          if (result.exitCode == 0) {
+            final lines = (result.stdout as String).split('\n');
+            if (lines.length > 1) {
+              final parts = lines[1].split(RegExp(r'\s+'));
+              if (parts.length >= 4) {
+                final freeSpaceKB = int.tryParse(parts[3]) ?? 0;
+                final freeSpaceMB = freeSpaceKB / 1024;
 
-              if (kDebugMode) {
-                debugPrint('[CoreML] Available disk space: ${freeSpaceMB.toStringAsFixed(1)}MB, estimated model size: ${estimatedSizeMB}MB');
-              }
-
-              if (freeSpaceMB < estimatedSizeMB * 2) { // 2x safety margin
                 if (kDebugMode) {
-                  debugPrint('[CoreML] Insufficient disk space for ${model.modelName} model (need ${estimatedSizeMB * 2}MB, have ${freeSpaceMB.toStringAsFixed(1)}MB)');
-                  debugPrint('[CoreML] CPU fallback will be used');
+                  debugPrint('[CoreML] Available disk space: ${freeSpaceMB.toStringAsFixed(1)}MB, estimated model size: ${estimatedSizeMB}MB');
                 }
-                return;
+
+                if (freeSpaceMB < estimatedSizeMB * 2) { // 2x safety margin
+                  if (kDebugMode) {
+                    debugPrint('[CoreML] Insufficient disk space for ${model.modelName} model (need ${estimatedSizeMB * 2}MB, have ${freeSpaceMB.toStringAsFixed(1)}MB)');
+                    debugPrint('[CoreML] CPU fallback will be used');
+                  }
+                  return;
+                }
               }
             }
           }
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          debugPrint('[CoreML] Warning: Could not check disk space: $e (continuing anyway)');
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Warning: Could not check disk space: $e (continuing anyway)');
+          }
         }
       }
     }
@@ -296,7 +297,7 @@ Future<void> _downloadCoreMLModel({
     
     final request = await httpClient.getUrl(coreMLUri);
     final response = await request.close();
-    
+
     if (response.statusCode != 200) {
       if (kDebugMode) {
         debugPrint('[CoreML] Model not available for ${model.modelName} (HTTP ${response.statusCode})');
@@ -304,83 +305,165 @@ Future<void> _downloadCoreMLModel({
       }
       return;
     }
-    
-    // Download zip file to memory with progress tracking
-    final List<int> zipBytes = [];
+
+    // Download zip file to disk first to avoid memory exhaustion
+    final zipTempFile = File('$destinationPath/.${coreMLFileName}.zip.$timestamp');
     final contentLength = response.contentLength;
     int downloadedBytes = 0;
     int lastReportedProgress = -1;
-    
-    await for (var chunk in response) {
-      zipBytes.addAll(chunk);
-      downloadedBytes += chunk.length;
 
-      if (contentLength > 0) {
-        final progressPercent = (downloadedBytes / contentLength * 100).round();
-        final downloadedMB = downloadedBytes / 1024 / 1024;
-        final totalMB = contentLength / 1024 / 1024;
+    try {
+      final sink = zipTempFile.openWrite();
 
-        // Call progress callback if provided
-        if (onProgress != null) {
-          onProgress(downloadedBytes / contentLength, downloadedMB, totalMB);
-        }
+      await for (var chunk in response) {
+        sink.add(chunk);
+        downloadedBytes += chunk.length;
 
-        // Report progress less frequently to reduce log spam
-        if (kDebugMode) {
-          if (progressPercent >= lastReportedProgress + 10 || progressPercent == 100) {
-            debugPrint('[CoreML] Download progress: $progressPercent% (${downloadedMB.toStringAsFixed(1)}MB/${totalMB.toStringAsFixed(1)}MB)');
-            lastReportedProgress = progressPercent;
+        if (contentLength > 0) {
+          final progressPercent = (downloadedBytes / contentLength * 100).round();
+          final downloadedMB = downloadedBytes / 1024 / 1024;
+          final totalMB = contentLength / 1024 / 1024;
+
+          // Call progress callback if provided
+          if (onProgress != null) {
+            onProgress(downloadedBytes / contentLength, downloadedMB, totalMB);
+          }
+
+          // Report progress less frequently to reduce log spam
+          if (kDebugMode) {
+            if (progressPercent >= lastReportedProgress + 10 || progressPercent == 100) {
+              debugPrint('[CoreML] Download progress: $progressPercent% (${downloadedMB.toStringAsFixed(1)}MB/${totalMB.toStringAsFixed(1)}MB)');
+              lastReportedProgress = progressPercent;
+            }
           }
         }
       }
-    }
-    
-    if (kDebugMode) {
-      debugPrint('[CoreML] Download complete, extracting ${model.modelName} CoreML model...');
-    }
-    
-    // Extract zip file to temporary directory first (atomic operation)
-    final Archive archive;
-    try {
-      archive = ZipDecoder().decodeBytes(Uint8List.fromList(zipBytes));
+
+      await sink.flush();
+      await sink.close();
+
+      if (kDebugMode) {
+        debugPrint('[CoreML] Download complete, extracting ${model.modelName} CoreML model...');
+      }
     } catch (e) {
-      throw Exception('[CoreML] Failed to decode zip file for ${model.modelName}: $e');
+      // Clean up zip file on download error
+      try {
+        if (zipTempFile.existsSync()) {
+          zipTempFile.deleteSync();
+        }
+      } catch (_) {}
+      rethrow;
     }
-    
+
+    // Extract ZIP file using platform-optimized method to minimize memory usage
     // Create temporary directory for extraction
     if (!coreMLTempDir.existsSync()) {
       coreMLTempDir.createSync(recursive: true);
     }
-    
-    // Extract all files to temporary directory
+
+    bool extractionSuccessful = false;
     int extractedFiles = 0;
-    for (final file in archive) {
+
+    // Try native unzip first on macOS (avoids loading entire ZIP into Dart memory)
+    if (Platform.isMacOS) {
       try {
-        final filename = file.name;
-        final filePath = '${coreMLTempDir.path}/$filename';
-        
-        if (file.isFile) {
-          final data = file.content as List<int>;
-          File(filePath)..createSync(recursive: true)..writeAsBytesSync(data);
-          extractedFiles++;
-        } else {
-          Directory(filePath).createSync(recursive: true);
+        if (kDebugMode) {
+          debugPrint('[CoreML] Using native unzip for extraction (memory-efficient)');
         }
-      } catch (e) {
-        // Clean up temp directory on extraction failure
-        if (coreMLTempDir.existsSync()) {
-          try {
-            coreMLTempDir.deleteSync(recursive: true);
-          } catch (cleanupError) {
-            if (kDebugMode) {
-              debugPrint('[CoreML] Warning: Failed to clean up after extraction error: $cleanupError');
-            }
+
+        final result = await Process.run(
+          'unzip',
+          ['-q', '-o', zipTempFile.path, '-d', coreMLTempDir.path],
+        );
+
+        if (result.exitCode == 0) {
+          extractionSuccessful = true;
+          // Count extracted files
+          extractedFiles = coreMLTempDir.listSync(recursive: true).whereType<File>().length;
+
+          if (kDebugMode) {
+            debugPrint('[CoreML] Native unzip successful: $extractedFiles files extracted');
+          }
+        } else {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Native unzip failed (exit ${result.exitCode}), falling back to Dart extraction');
           }
         }
-        throw Exception('[CoreML] Failed to extract ${file.name}: $e');
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Native unzip unavailable: $e, falling back to Dart extraction');
+        }
       }
     }
-    
+
+    // Fallback to Dart-based extraction if native method unavailable or failed
+    if (!extractionSuccessful) {
+      try {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Using Dart-based ZIP extraction');
+        }
+
+        final zipBytes = zipTempFile.readAsBytesSync();
+        final archive = ZipDecoder().decodeBytes(zipBytes);
+
+        // Extract all files to temporary directory
+        for (final file in archive) {
+          try {
+            final filename = file.name;
+            final filePath = '${coreMLTempDir.path}/$filename';
+
+            if (file.isFile) {
+              final data = file.content as List<int>;
+              File(filePath)..createSync(recursive: true)..writeAsBytesSync(data);
+              extractedFiles++;
+            } else {
+              Directory(filePath).createSync(recursive: true);
+            }
+          } catch (e) {
+            // Clean up on extraction failure
+            if (coreMLTempDir.existsSync()) {
+              try {
+                coreMLTempDir.deleteSync(recursive: true);
+              } catch (cleanupError) {
+                if (kDebugMode) {
+                  debugPrint('[CoreML] Warning: Failed to clean up after extraction error: $cleanupError');
+                }
+              }
+            }
+            throw Exception('[CoreML] Failed to extract ${file.name}: $e');
+          }
+        }
+
+        extractionSuccessful = true;
+
+        if (kDebugMode) {
+          debugPrint('[CoreML] Dart extraction completed: $extractedFiles files');
+        }
+      } catch (e) {
+        // Clean up zip file and rethrow
+        try {
+          if (zipTempFile.existsSync()) {
+            zipTempFile.deleteSync();
+          }
+        } catch (_) {}
+        rethrow;
+      }
+    }
+
+    // Clean up zip file after successful extraction
+    try {
+      if (zipTempFile.existsSync()) {
+        zipTempFile.deleteSync();
+        if (kDebugMode) {
+          debugPrint('[CoreML] Cleaned up temp zip file');
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[CoreML] Warning: Failed to clean up temp zip file: $e');
+      }
+    }
+
     if (kDebugMode) {
       debugPrint('[CoreML] Extracted $extractedFiles files for ${model.modelName} CoreML model');
     }
