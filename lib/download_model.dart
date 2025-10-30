@@ -346,8 +346,29 @@ Future<void> _downloadCoreMLModel({
       await sink.flush();
       await sink.close();
 
+      // Validate ZIP file download
+      final zipFileSize = zipTempFile.lengthSync();
       if (kDebugMode) {
-        debugPrint('[CoreML] Download complete, extracting ${model.modelName} CoreML model...');
+        debugPrint('[CoreML] Download complete: ${(zipFileSize / 1024 / 1024).toStringAsFixed(1)}MB');
+      }
+
+      // Verify download integrity
+      if (contentLength > 0 && downloadedBytes != contentLength) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] WARNING: Downloaded $downloadedBytes bytes but expected $contentLength bytes');
+        }
+        throw Exception('[CoreML] Incomplete download: got $downloadedBytes bytes, expected $contentLength');
+      }
+
+      if (zipFileSize < 1024 * 100) { // Less than 100KB is suspiciously small
+        if (kDebugMode) {
+          debugPrint('[CoreML] WARNING: ZIP file is suspiciously small (${zipFileSize} bytes)');
+        }
+        throw Exception('[CoreML] ZIP file too small, possibly corrupted');
+      }
+
+      if (kDebugMode) {
+        debugPrint('[CoreML] Extracting ${model.modelName} CoreML model...');
       }
     } catch (e) {
       // Clean up zip file on download error
@@ -471,12 +492,40 @@ Future<void> _downloadCoreMLModel({
     if (kDebugMode) {
       debugPrint('[CoreML] Extracted $extractedFiles files for ${model.modelName} CoreML model');
     }
-    
-    // Validate the extraction by checking for required CoreML files
+
+    // Validate the extraction by checking file count and required files
     final tempFiles = coreMLTempDir.listSync(recursive: true);
+    final fileCount = tempFiles.whereType<File>().length;
+
     if (tempFiles.isEmpty) {
       coreMLTempDir.deleteSync(recursive: true);
       throw Exception('[CoreML] Extracted model directory is empty for ${model.modelName}');
+    }
+
+    // CoreML models should have at least 50 files (typically 100+)
+    if (fileCount < 50) {
+      if (kDebugMode) {
+        debugPrint('[CoreML] WARNING: Only $fileCount files extracted, expected 50+. Model may be corrupted.');
+        debugPrint('[CoreML] Files found: ${tempFiles.map((f) => f.path.split('/').last).take(10).join(', ')}...');
+      }
+      coreMLTempDir.deleteSync(recursive: true);
+      throw Exception('[CoreML] Insufficient files extracted ($fileCount), model is corrupted or incomplete');
+    }
+
+    // Check for required CoreML files
+    final hasMetadata = tempFiles.any((f) => f.path.endsWith('metadata.json'));
+    final hasCoreMLData = tempFiles.any((f) => f.path.endsWith('coremldata.bin'));
+
+    if (!hasMetadata || !hasCoreMLData) {
+      if (kDebugMode) {
+        debugPrint('[CoreML] WARNING: Missing required files - metadata: $hasMetadata, coremldata: $hasCoreMLData');
+      }
+      coreMLTempDir.deleteSync(recursive: true);
+      throw Exception('[CoreML] Missing required CoreML files (metadata or coremldata.bin)');
+    }
+
+    if (kDebugMode) {
+      debugPrint('[CoreML] Validation passed: $fileCount files, all required files present');
     }
     
     // Atomically move from temp to final location
