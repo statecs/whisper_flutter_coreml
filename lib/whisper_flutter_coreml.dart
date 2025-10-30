@@ -113,11 +113,12 @@ class Whisper {
           debugPrint("Attempting to download CoreML model for ${modelToInit.modelName}...");
         }
         await downloadModel(
-            model: modelToInit, 
-            destinationPath: modelDir, 
+            model: modelToInit,
+            destinationPath: modelDir,
             downloadHost: downloadHost,
             downloadCoreML: true,
-            skipBinDownload: true);
+            skipBinDownload: true,
+            onProgress: null);
         
         // Re-check CoreML availability after download
         final bool hasCoreMLAfterDownload = modelToInit.hasCoreMLModel(modelDir);
@@ -135,10 +136,11 @@ class Whisper {
         debugPrint("Downloading model ${modelToInit.modelName}...");
       }
       await downloadModel(
-          model: modelToInit, 
-          destinationPath: modelDir, 
+          model: modelToInit,
+          destinationPath: modelDir,
           downloadHost: downloadHost,
-          downloadCoreML: Platform.isIOS || Platform.isMacOS);
+          downloadCoreML: Platform.isIOS || Platform.isMacOS,
+          onProgress: null);
     }
   }
 

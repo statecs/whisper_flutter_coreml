@@ -105,14 +105,22 @@ enum WhisperModel {
   }
 }
 
+/// Callback for download progress updates
+/// [progress] is a value between 0.0 and 1.0
+/// [downloadedMB] is the amount downloaded in megabytes
+/// [totalMB] is the total size in megabytes
+typedef DownloadProgressCallback = void Function(double progress, double downloadedMB, double totalMB);
+
 /// Download [model] to [destinationPath]
 /// Also attempts to download CoreML model for hardware acceleration if available
+/// [onProgress] is an optional callback for monitoring download progress
 Future<String> downloadModel(
     {required WhisperModel model,
     required String destinationPath,
     String? downloadHost,
     bool downloadCoreML = true,
-    bool skipBinDownload = false}) async {
+    bool skipBinDownload = false,
+    DownloadProgressCallback? onProgress}) async {
   final file = File("$destinationPath/ggml-${model.modelName}.bin");
   
   if (!skipBinDownload) {
@@ -163,6 +171,7 @@ Future<String> downloadModel(
       model: model,
       destinationPath: destinationPath,
       downloadHost: downloadHost,
+      onProgress: onProgress,
     );
   }
   
@@ -174,12 +183,15 @@ Future<void> _downloadCoreMLModel({
   required WhisperModel model,
   required String destinationPath,
   String? downloadHost,
+  DownloadProgressCallback? onProgress,
 }) async {
   if (model == WhisperModel.none) return;
-  
+
   final coreMLFileName = 'ggml-${model.modelName}-encoder.mlmodelc';
   final coreMLDir = Directory('$destinationPath/$coreMLFileName');
-  final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp');
+  // Add timestamp to prevent race conditions with concurrent downloads
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp.$timestamp');
   
   // Check if CoreML model already exists and is valid
   if (coreMLDir.existsSync() && coreMLDir.listSync().isNotEmpty) {
@@ -189,23 +201,82 @@ Future<void> _downloadCoreMLModel({
     return;
   }
   
-  // Clean up any partial downloads
-  if (coreMLTempDir.existsSync()) {
-    try {
-      coreMLTempDir.deleteSync(recursive: true);
-    } catch (_) {}
+  // Clean up any partial downloads (including from previous attempts with different timestamps)
+  final destinationDir = Directory(destinationPath);
+  if (destinationDir.existsSync()) {
+    final tempDirs = destinationDir.listSync()
+        .whereType<Directory>()
+        .where((dir) => dir.path.contains('.$coreMLFileName.tmp'));
+
+    for (final tempDir in tempDirs) {
+      try {
+        tempDir.deleteSync(recursive: true);
+        if (kDebugMode) {
+          debugPrint('[CoreML] Cleaned up old temp directory: ${tempDir.path}');
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Warning: Failed to clean up old temp directory: $e');
+        }
+      }
+    }
   }
+
   if (coreMLDir.existsSync()) {
     try {
       coreMLDir.deleteSync(recursive: true);
-    } catch (_) {}
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[CoreML] Warning: Failed to clean up partial download: $e');
+      }
+    }
   }
   
   try {
+    // Check available disk space before downloading
+    final destinationDir = Directory(destinationPath);
+    if (destinationDir.existsSync()) {
+      // Estimate CoreML model size: tiny/base ~40MB, small ~150MB, medium/large ~500MB
+      final estimatedSizeMB = model == WhisperModel.tiny || model == WhisperModel.base ? 40
+          : model == WhisperModel.small ? 150
+          : 500;
+
+      // Get free space using df command
+      try {
+        final result = await Process.run('df', ['-k', destinationPath]);
+        if (result.exitCode == 0) {
+          final lines = (result.stdout as String).split('\n');
+          if (lines.length > 1) {
+            final parts = lines[1].split(RegExp(r'\s+'));
+            if (parts.length >= 4) {
+              final freeSpaceKB = int.tryParse(parts[3]) ?? 0;
+              final freeSpaceMB = freeSpaceKB / 1024;
+
+              if (kDebugMode) {
+                debugPrint('[CoreML] Available disk space: ${freeSpaceMB.toStringAsFixed(1)}MB, estimated model size: ${estimatedSizeMB}MB');
+              }
+
+              if (freeSpaceMB < estimatedSizeMB * 2) { // 2x safety margin
+                if (kDebugMode) {
+                  debugPrint('[CoreML] Insufficient disk space for ${model.modelName} model (need ${estimatedSizeMB * 2}MB, have ${freeSpaceMB.toStringAsFixed(1)}MB)');
+                  debugPrint('[CoreML] CPU fallback will be used');
+                }
+                return;
+              }
+            }
+          }
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Warning: Could not check disk space: $e (continuing anyway)');
+        }
+      }
+    }
+
     if (kDebugMode) {
       debugPrint('[CoreML] Downloading ${model.modelName} CoreML model...');
     }
-    
+
     final httpClient = HttpClient();
     
     Uri coreMLUri;
@@ -239,13 +310,23 @@ Future<void> _downloadCoreMLModel({
     await for (var chunk in response) {
       zipBytes.addAll(chunk);
       downloadedBytes += chunk.length;
-      
-      // Report progress less frequently to reduce log spam
-      if (kDebugMode && contentLength > 0) {
-        final progress = (downloadedBytes / contentLength * 100).round();
-        if (progress >= lastReportedProgress + 10 || progress == 100) {
-          debugPrint('[CoreML] Download progress: $progress% (${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)}MB/${(contentLength / 1024 / 1024).toStringAsFixed(1)}MB)');
-          lastReportedProgress = progress;
+
+      if (contentLength > 0) {
+        final progressPercent = (downloadedBytes / contentLength * 100).round();
+        final downloadedMB = downloadedBytes / 1024 / 1024;
+        final totalMB = contentLength / 1024 / 1024;
+
+        // Call progress callback if provided
+        if (onProgress != null) {
+          onProgress(downloadedBytes / contentLength, downloadedMB, totalMB);
+        }
+
+        // Report progress less frequently to reduce log spam
+        if (kDebugMode) {
+          if (progressPercent >= lastReportedProgress + 10 || progressPercent == 100) {
+            debugPrint('[CoreML] Download progress: $progressPercent% (${downloadedMB.toStringAsFixed(1)}MB/${totalMB.toStringAsFixed(1)}MB)');
+            lastReportedProgress = progressPercent;
+          }
         }
       }
     }
@@ -286,7 +367,11 @@ Future<void> _downloadCoreMLModel({
         if (coreMLTempDir.existsSync()) {
           try {
             coreMLTempDir.deleteSync(recursive: true);
-          } catch (_) {}
+          } catch (cleanupError) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Warning: Failed to clean up after extraction error: $cleanupError');
+            }
+          }
         }
         throw Exception('[CoreML] Failed to extract ${file.name}: $e');
       }
@@ -311,7 +396,11 @@ Future<void> _downloadCoreMLModel({
       if (coreMLTempDir.existsSync()) {
         try {
           coreMLTempDir.deleteSync(recursive: true);
-        } catch (_) {}
+        } catch (cleanupError) {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Warning: Failed to clean up after move failure: $cleanupError');
+          }
+        }
       }
       throw Exception('[CoreML] Failed to move CoreML model to final location: $e');
     }
@@ -331,12 +420,20 @@ Future<void> _downloadCoreMLModel({
     if (coreMLTempDir.existsSync()) {
       try {
         coreMLTempDir.deleteSync(recursive: true);
-      } catch (_) {}
+      } catch (cleanupError) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Warning: Failed to clean up temp directory after error: $cleanupError');
+        }
+      }
     }
     if (coreMLDir.existsSync()) {
       try {
         coreMLDir.deleteSync(recursive: true);
-      } catch (_) {}
+      } catch (cleanupError) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Warning: Failed to clean up partial download after error: $cleanupError');
+        }
+      }
     }
   }
 }
