@@ -14,34 +14,38 @@ import "package:archive/archive.dart";
 /// Available whisper models
 enum WhisperModel {
   // no model
-  none("", 0),
+  none("", 0, 0),
 
   /// tiny model for all languages
-  tiny("tiny", 39),
+  tiny("tiny", 39, 200),
 
   /// base model for all languages
-  base("base", 142),
+  base("base", 142, 500),
 
   /// small model for all languages
-  small("small", 466),
+  small("small", 466, 750),
 
-  /// turbo model for all languages  
-  turbo("large-v3-turbo", 1536),
+  /// turbo model for all languages
+  turbo("large-v3-turbo", 1536, 3600),
 
   /// medium model for all languages
-  medium("medium", 1500),
+  medium("medium", 1500, 3100),
 
   /// large model for all languages
-  largeV1("large-v1", 2900),
-  largeV2("large-v2", 2900);
+  largeV1("large-v1", 2900, 5800),
+  largeV2("large-v2", 2900, 5800);
 
-  const WhisperModel(this.modelName, this.memoryRequirementMB);
+  const WhisperModel(this.modelName, this.memoryRequirementMB, this.nativeMemoryRequirementMB);
 
   /// Public name of model
   final String modelName;
-  
-  /// Memory requirement in MB (including working memory overhead)
+
+  /// Model size in MB (file size)
   final int memoryRequirementMB;
+
+  /// Native whisper.cpp memory requirement in MB (actual RAM needed during model load)
+  /// This is the memory reported by whisper_model_load before CoreML optimization kicks in
+  final int nativeMemoryRequirementMB;
 
   /// Get local path of model file
   String getPath(String dir) {
@@ -53,18 +57,18 @@ enum WhisperModel {
   bool canRunWithMemory(double availableMemoryMB, {bool hasCoreML = false}) {
     if (this == WhisperModel.none) return true;
 
-    // Use different safety factors based on acceleration:
-    // - CoreML: 1.2x safety (models are memory-mapped, use Neural Engine/GPU, minimal overhead)
-    // - CPU: 3.0x safety (full model loaded in RAM, higher overhead)
-    final safetyFactor = hasCoreML ? 1.2 : 3.0;
-    final requiredWithSafety = memoryRequirementMB * safetyFactor;
+    // Use native memory requirements (actual whisper.cpp RAM usage during load)
+    // Even with CoreML, the model must be loaded into memory first before optimization
+    // Add small safety margin for system overhead
+    final safetyMargin = hasCoreML ? 200 : 500; // MB
+    final requiredMemory = nativeMemoryRequirementMB + safetyMargin;
 
     if (kDebugMode) {
       final mode = hasCoreML ? 'CoreML' : 'CPU';
-      debugPrint('[Memory Check] Model $modelName ($mode): requires ${memoryRequirementMB}MB (${requiredWithSafety.toInt()}MB with ${safetyFactor}x safety), available: ${availableMemoryMB.toInt()}MB');
+      debugPrint('[Memory Check] Model $modelName ($mode): native requires ${nativeMemoryRequirementMB}MB + ${safetyMargin}MB margin = ${requiredMemory}MB total, available: ${availableMemoryMB.toInt()}MB');
     }
 
-    return availableMemoryMB >= requiredWithSafety;
+    return availableMemoryMB >= requiredMemory;
   }
   
   /// Check if CoreML model exists for this whisper model
