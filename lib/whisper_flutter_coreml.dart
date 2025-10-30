@@ -118,6 +118,16 @@ class Whisper {
             downloadHost: downloadHost,
             downloadCoreML: true,
             skipBinDownload: true);
+        
+        // Re-check CoreML availability after download
+        final bool hasCoreMLAfterDownload = modelToInit.hasCoreMLModel(modelDir);
+        if (kDebugMode) {
+          debugPrint("CoreML model availability after download: ${hasCoreMLAfterDownload ? 'Available' : 'Not available'}");
+        }
+      }
+      
+      if (kDebugMode) {
+        debugPrint("Model initialization complete for ${modelToInit.modelName}");
       }
       return;
     } else {

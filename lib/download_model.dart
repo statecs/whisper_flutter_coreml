@@ -169,7 +169,7 @@ Future<String> downloadModel(
   return file.path;
 }
 
-/// Download CoreML model for hardware acceleration (iOS only)
+/// Download CoreML model for hardware acceleration (iOS/macOS only)
 Future<void> _downloadCoreMLModel({
   required WhisperModel model,
   required String destinationPath,
@@ -179,13 +179,26 @@ Future<void> _downloadCoreMLModel({
   
   final coreMLFileName = 'ggml-${model.modelName}-encoder.mlmodelc';
   final coreMLDir = Directory('$destinationPath/$coreMLFileName');
+  final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp');
   
-  // Check if CoreML model already exists
-  if (coreMLDir.existsSync()) {
+  // Check if CoreML model already exists and is valid
+  if (coreMLDir.existsSync() && coreMLDir.listSync().isNotEmpty) {
     if (kDebugMode) {
       debugPrint('[CoreML] Model already exists: ${coreMLDir.path}');
     }
     return;
+  }
+  
+  // Clean up any partial downloads
+  if (coreMLTempDir.existsSync()) {
+    try {
+      coreMLTempDir.deleteSync(recursive: true);
+    } catch (_) {}
+  }
+  if (coreMLDir.existsSync()) {
+    try {
+      coreMLDir.deleteSync(recursive: true);
+    } catch (_) {}
   }
   
   try {
@@ -221,14 +234,19 @@ Future<void> _downloadCoreMLModel({
     final List<int> zipBytes = [];
     final contentLength = response.contentLength;
     int downloadedBytes = 0;
+    int lastReportedProgress = -1;
     
     await for (var chunk in response) {
       zipBytes.addAll(chunk);
       downloadedBytes += chunk.length;
       
+      // Report progress less frequently to reduce log spam
       if (kDebugMode && contentLength > 0) {
         final progress = (downloadedBytes / contentLength * 100).round();
-        debugPrint('[CoreML] Download progress: $progress% (${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)}MB/${(contentLength / 1024 / 1024).toStringAsFixed(1)}MB)');
+        if (progress >= lastReportedProgress + 10 || progress == 100) {
+          debugPrint('[CoreML] Download progress: $progress% (${(downloadedBytes / 1024 / 1024).toStringAsFixed(1)}MB/${(contentLength / 1024 / 1024).toStringAsFixed(1)}MB)');
+          lastReportedProgress = progress;
+        }
       }
     }
     
@@ -236,7 +254,7 @@ Future<void> _downloadCoreMLModel({
       debugPrint('[CoreML] Download complete, extracting ${model.modelName} CoreML model...');
     }
     
-    // Extract zip file
+    // Extract zip file to temporary directory first (atomic operation)
     final Archive archive;
     try {
       archive = ZipDecoder().decodeBytes(Uint8List.fromList(zipBytes));
@@ -244,17 +262,17 @@ Future<void> _downloadCoreMLModel({
       throw Exception('[CoreML] Failed to decode zip file for ${model.modelName}: $e');
     }
     
-    // Create destination directory
-    if (!coreMLDir.existsSync()) {
-      coreMLDir.createSync(recursive: true);
+    // Create temporary directory for extraction
+    if (!coreMLTempDir.existsSync()) {
+      coreMLTempDir.createSync(recursive: true);
     }
     
-    // Extract all files from the zip
+    // Extract all files to temporary directory
     int extractedFiles = 0;
     for (final file in archive) {
       try {
         final filename = file.name;
-        final filePath = '${coreMLDir.path}/$filename';
+        final filePath = '${coreMLTempDir.path}/$filename';
         
         if (file.isFile) {
           final data = file.content as List<int>;
@@ -264,6 +282,12 @@ Future<void> _downloadCoreMLModel({
           Directory(filePath).createSync(recursive: true);
         }
       } catch (e) {
+        // Clean up temp directory on extraction failure
+        if (coreMLTempDir.existsSync()) {
+          try {
+            coreMLTempDir.deleteSync(recursive: true);
+          } catch (_) {}
+        }
         throw Exception('[CoreML] Failed to extract ${file.name}: $e');
       }
     }
@@ -272,8 +296,29 @@ Future<void> _downloadCoreMLModel({
       debugPrint('[CoreML] Extracted $extractedFiles files for ${model.modelName} CoreML model');
     }
     
+    // Validate the extraction by checking for required CoreML files
+    final tempFiles = coreMLTempDir.listSync(recursive: true);
+    if (tempFiles.isEmpty) {
+      coreMLTempDir.deleteSync(recursive: true);
+      throw Exception('[CoreML] Extracted model directory is empty for ${model.modelName}');
+    }
+    
+    // Atomically move from temp to final location
+    try {
+      coreMLTempDir.renameSync(coreMLDir.path);
+    } catch (e) {
+      // Clean up on move failure
+      if (coreMLTempDir.existsSync()) {
+        try {
+          coreMLTempDir.deleteSync(recursive: true);
+        } catch (_) {}
+      }
+      throw Exception('[CoreML] Failed to move CoreML model to final location: $e');
+    }
+    
     if (kDebugMode) {
-      debugPrint('[CoreML] Successfully downloaded and extracted ${model.modelName} CoreML model');
+      debugPrint('[CoreML] Successfully downloaded and extracted ${model.modelName} CoreML model to ${coreMLDir.path}');
+      debugPrint('[CoreML] CoreML model ready for hardware acceleration');
     }
     
   } catch (e) {
@@ -281,7 +326,13 @@ Future<void> _downloadCoreMLModel({
       debugPrint('[CoreML] Failed to download CoreML model for ${model.modelName}: $e');
       debugPrint('[CoreML] CPU fallback will be used');
     }
-    // Clean up any partial downloads
+    
+    // Clean up any partial downloads or temp directories
+    if (coreMLTempDir.existsSync()) {
+      try {
+        coreMLTempDir.deleteSync(recursive: true);
+      } catch (_) {}
+    }
     if (coreMLDir.existsSync()) {
       try {
         coreMLDir.deleteSync(recursive: true);
