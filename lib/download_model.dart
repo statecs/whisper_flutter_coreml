@@ -198,27 +198,74 @@ Future<void> _downloadCoreMLModel({
   final downloadKey = '${model.modelName}@$destinationPath';
 
   // Check if CoreML model already exists and is valid
-  // Need to check if it's actually a directory (not a symlink or file)
   if (coreMLDir.existsSync()) {
     final entityType = FileSystemEntity.typeSync(coreMLDir.path, followLinks: false);
 
-    // If it's a symlink or file (not a proper directory), remove it and re-download
-    if (entityType == FileSystemEntityType.link || entityType == FileSystemEntityType.file) {
+    // Handle symlinks - check if they point to valid CoreML models
+    if (entityType == FileSystemEntityType.link) {
       if (kDebugMode) {
-        final typeStr = entityType == FileSystemEntityType.link ? 'symlink' : 'file';
-        debugPrint('[CoreML] Found invalid $typeStr at model path, removing and re-downloading');
+        debugPrint('[CoreML] Found symlink at model path, validating target...');
       }
+
+      // Follow the symlink and check if it points to a valid CoreML model
       try {
-        if (entityType == FileSystemEntityType.link) {
-          Link(coreMLDir.path).deleteSync();
+        final symlinkTarget = Link(coreMLDir.path).targetSync();
+        final targetDir = Directory(symlinkTarget);
+
+        if (kDebugMode) {
+          debugPrint('[CoreML] Symlink points to: $symlinkTarget');
+        }
+
+        // Check if symlink target exists and contains valid CoreML files
+        if (targetDir.existsSync()) {
+          final targetFiles = targetDir.listSync(recursive: true);
+          final hasMetadata = targetFiles.any((f) => f.path.endsWith('metadata.json'));
+          final hasCoreMLData = targetFiles.any((f) => f.path.endsWith('coremldata.bin'));
+          final hasModelMil = targetFiles.any((f) => f.path.endsWith('model.mil'));
+
+          if (hasMetadata && hasCoreMLData && hasModelMil) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Symlink points to valid CoreML model, using it');
+            }
+            return; // Valid symlink to valid model - use it!
+          } else {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Symlink target is incomplete/corrupted (metadata:$hasMetadata, coremldata:$hasCoreMLData, model.mil:$hasModelMil)');
+              debugPrint('[CoreML] Removing invalid symlink and re-downloading');
+            }
+          }
         } else {
-          File(coreMLDir.path).deleteSync();
+          if (kDebugMode) {
+            debugPrint('[CoreML] Symlink target does not exist: $symlinkTarget');
+            debugPrint('[CoreML] Removing broken symlink and re-downloading');
+          }
         }
       } catch (e) {
         if (kDebugMode) {
-          debugPrint('[CoreML] Failed to remove invalid entity: $e');
+          debugPrint('[CoreML] Failed to validate symlink: $e');
+          debugPrint('[CoreML] Removing invalid symlink and re-downloading');
         }
-        // Continue to try download anyway
+      }
+
+      // If we get here, symlink is broken or invalid - remove it
+      try {
+        Link(coreMLDir.path).deleteSync();
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Failed to remove invalid symlink: $e');
+        }
+      }
+    } else if (entityType == FileSystemEntityType.file) {
+      // Files are definitely invalid - remove them
+      if (kDebugMode) {
+        debugPrint('[CoreML] Found invalid file at model path, removing and re-downloading');
+      }
+      try {
+        File(coreMLDir.path).deleteSync();
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Failed to remove invalid file: $e');
+        }
       }
     } else if (entityType == FileSystemEntityType.directory) {
       // Verify it has valid CoreML files
