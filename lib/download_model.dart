@@ -522,22 +522,66 @@ Future<void> _downloadCoreMLModel({
     if (kDebugMode) {
       debugPrint('[CoreML] Validation passed: All required CoreML files present ($fileCount total files)');
     }
-    
-    // Atomically move from temp to final location
-    try {
-      coreMLTempDir.renameSync(coreMLDir.path);
-    } catch (e) {
-      // Clean up on move failure
-      if (coreMLTempDir.existsSync()) {
-        try {
-          coreMLTempDir.deleteSync(recursive: true);
-        } catch (cleanupError) {
-          if (kDebugMode) {
-            debugPrint('[CoreML] Warning: Failed to clean up after move failure: $cleanupError');
+
+    // Check if ZIP extracted the .mlmodelc directory as a nested subdirectory
+    // (Hugging Face ZIPs contain the .mlmodelc folder inside the archive)
+    final topLevelEntries = coreMLTempDir.listSync(followLinks: false);
+    final topLevelDirs = topLevelEntries.whereType<Directory>().toList();
+
+    // If temp directory contains exactly one subdirectory with the .mlmodelc name,
+    // we need to move its contents up one level
+    if (topLevelDirs.length == 1 && topLevelDirs.first.path.endsWith(coreMLFileName)) {
+      if (kDebugMode) {
+        debugPrint('[CoreML] Detected nested .mlmodelc structure - flattening');
+      }
+
+      final nestedDir = topLevelDirs.first;
+      final flattenTempDir = Directory('$destinationPath/.$coreMLFileName.flatten.$timestamp');
+
+      try {
+        // Move the nested .mlmodelc directory to a temporary flatten location
+        nestedDir.renameSync(flattenTempDir.path);
+
+        // Delete now-empty temp directory
+        coreMLTempDir.deleteSync(recursive: true);
+
+        // Rename flatten directory to final location
+        flattenTempDir.renameSync(coreMLDir.path);
+
+        if (kDebugMode) {
+          debugPrint('[CoreML] Successfully flattened and moved nested structure');
+        }
+      } catch (e) {
+        // Clean up on failure
+        if (flattenTempDir.existsSync()) {
+          try {
+            flattenTempDir.deleteSync(recursive: true);
+          } catch (_) {}
+        }
+        if (coreMLTempDir.existsSync()) {
+          try {
+            coreMLTempDir.deleteSync(recursive: true);
+          } catch (_) {}
+        }
+        throw Exception('[CoreML] Failed to flatten nested structure: $e');
+      }
+    } else {
+      // Normal case: temp directory already contains the correct structure
+      try {
+        coreMLTempDir.renameSync(coreMLDir.path);
+      } catch (e) {
+        // Clean up on move failure
+        if (coreMLTempDir.existsSync()) {
+          try {
+            coreMLTempDir.deleteSync(recursive: true);
+          } catch (cleanupError) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Warning: Failed to clean up after move failure: $cleanupError');
+            }
           }
         }
+        throw Exception('[CoreML] Failed to move CoreML model to final location: $e');
       }
-      throw Exception('[CoreML] Failed to move CoreML model to final location: $e');
     }
     
     if (kDebugMode) {
