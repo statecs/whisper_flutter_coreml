@@ -21,9 +21,9 @@ enum WhisperModel {
   /// small model for all languages
   small("small-q8_0", 466, 600),
   /// medium model for all languages
-  medium("medium-q8_0", 1500, 1000),
+  medium("medium-q8_0", 1269, 1269),
   /// turbo model for all languages
-  turbo("large-v3-turbo-q8_0", 1536, 1000),
+  turbo("large-v3-turbo-q5_0", 1536, 1000),
   /// large model for all languages
   largeV1("large-v1-q8_0", 2900, 2900),
   largeV2("large-v2-q8_0", 2900, 2900);
