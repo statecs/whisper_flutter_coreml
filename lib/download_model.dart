@@ -16,21 +16,17 @@ enum WhisperModel {
   tiny("tiny", 39, 200),
 
   /// base model for all languages
-  base("base", 142, 500),
+  base("base-q8_0", 142, 500),
 
   /// small model for all languages
-  small("small", 466, 750),
+  small("small-q8_0", 466, 750),
   /// medium model for all languages
-  medium("medium", 1500, 1500),
-
-
+  medium("medium-q8_0", 1500, 1500),
   /// turbo model for all languages
   turbo("large-v3-turbo-q8_0", 1536, 1536),
-
-
   /// large model for all languages
-  largeV1("large-v1", 2900, 2900),
-  largeV2("large-v2", 2900, 2900);
+  largeV1("large-v1-q8_0", 2900, 2900),
+  largeV2("large-v2-q8_0", 2900, 2900);
 
   const WhisperModel(this.modelName, this.memoryRequirementMB, this.nativeMemoryRequirementMB);
 
