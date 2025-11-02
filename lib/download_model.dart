@@ -23,11 +23,11 @@ enum WhisperModel {
   /// medium model for all languages
   medium("medium-q8_0", 1269, 1269),
   /// turbo model for all languages
-  turbo("large-v3-turbo", 1536, 1536),
+  turbo("large-v3-turbo", 3000, 3557),
   /// large model for all languages
-  largeV1("large-v1", 1536, 1536),
-  largeV2("large-v2", 1536, 1536),
-  largeV3("large-v3", 1536, 1536);
+  largeV1("large-v1", 3000, 3557),
+  largeV2("large-v2", 3000, 3557),
+  largeV3("large-v3", 3000, 3557);
 
   const WhisperModel(this.modelName, this.memoryRequirementMB, this.nativeMemoryRequirementMB);
 
