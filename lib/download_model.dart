@@ -77,31 +77,36 @@ enum WhisperModel {
   /// Get the best model that can run with available memory
   /// [hasCoreML] indicates if CoreML hardware acceleration is available
   static WhisperModel getBestModelForMemory(double availableMemoryMB, {bool hasCoreML = false}) {
-    // Try models in order of preference (quality)
+    // Try models from smallest to largest (memory requirement ascending order)
+    // This ensures we select the largest model that fits, without overshooting
     final modelsInPreferenceOrder = [
-      WhisperModel.turbo,
-      WhisperModel.largeV2,
-      WhisperModel.largeV1,
-      WhisperModel.medium,
-      WhisperModel.small,
-      WhisperModel.base,
       WhisperModel.tiny,
+      WhisperModel.base,
+      WhisperModel.small,
+      WhisperModel.medium,
+      WhisperModel.turbo,
+      WhisperModel.largeV1,
+      WhisperModel.largeV2,
     ];
 
+    // Find the largest model that can run with available memory
+    WhisperModel? bestFit;
     for (final model in modelsInPreferenceOrder) {
       if (model.canRunWithMemory(availableMemoryMB, hasCoreML: hasCoreML)) {
-        if (kDebugMode) {
-          final mode = hasCoreML ? 'CoreML' : 'CPU';
-          debugPrint('[Memory Selection] Selected model: ${model.modelName} ($mode, requires ${model.memoryRequirementMB}MB)');
-        }
-        return model;
+        bestFit = model; // Keep updating to larger models as long as they fit
+      } else {
+        break; // Stop when we hit a model that's too large
       }
     }
 
+    final selectedModel = bestFit ?? WhisperModel.tiny;
+
     if (kDebugMode) {
-      debugPrint('[Memory Selection] No model fits in ${availableMemoryMB.toInt()}MB - using tiny as last resort');
+      final mode = hasCoreML ? 'CoreML' : 'CPU';
+      debugPrint('[Memory Selection] Selected model: ${selectedModel.modelName} ($mode, requires ${selectedModel.memoryRequirementMB}MB)');
     }
-    return WhisperModel.tiny; // Fallback to smallest model
+
+    return selectedModel;
   }
 }
 
