@@ -216,10 +216,11 @@ Future<void> _downloadCoreMLModel({
   // Mark this download as active
   _activeDownloads.add(downloadKey);
 
+  // Declare variables at function scope so they're accessible in catch/finally
+  final timestamp = DateTime.now().millisecondsSinceEpoch;
+  final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp.$timestamp');
+
   try {
-    // Add timestamp to prevent race conditions with concurrent downloads
-    final timestamp = DateTime.now().millisecondsSinceEpoch;
-    final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp.$timestamp');
 
     // Clean up any partial downloads (including from previous attempts with different timestamps)
     final destinationDir = Directory(destinationPath);
@@ -242,19 +243,18 @@ Future<void> _downloadCoreMLModel({
       }
     }
 
-  if (coreMLDir.existsSync()) {
-    try {
-      coreMLDir.deleteSync(recursive: true);
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[CoreML] Warning: Failed to clean up partial download: $e');
+    // Clean up any existing partial download before starting
+    if (coreMLDir.existsSync()) {
+      try {
+        coreMLDir.deleteSync(recursive: true);
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Warning: Failed to clean up partial download: $e');
+        }
       }
     }
-  }
-  
-  try {
+
     // Check available disk space before downloading
-    final destinationDir = Directory(destinationPath);
     if (destinationDir.existsSync()) {
       // Estimate CoreML model size: tiny/base ~40MB, small ~150MB, medium/large ~500MB
       final estimatedSizeMB = model == WhisperModel.tiny || model == WhisperModel.base ? 40
