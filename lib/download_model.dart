@@ -181,6 +181,9 @@ Future<String> downloadModel(
   return file.path;
 }
 
+// Track ongoing downloads to prevent concurrent downloads of the same model
+final Set<String> _activeDownloads = {};
+
 /// Download CoreML model for hardware acceleration (iOS/macOS only)
 Future<void> _downloadCoreMLModel({
   required WhisperModel model,
@@ -192,10 +195,8 @@ Future<void> _downloadCoreMLModel({
 
   final coreMLFileName = 'ggml-${model.modelName}-encoder.mlmodelc';
   final coreMLDir = Directory('$destinationPath/$coreMLFileName');
-  // Add timestamp to prevent race conditions with concurrent downloads
-  final timestamp = DateTime.now().millisecondsSinceEpoch;
-  final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp.$timestamp');
-  
+  final downloadKey = '${model.modelName}@$destinationPath';
+
   // Check if CoreML model already exists and is valid
   if (coreMLDir.existsSync() && coreMLDir.listSync().isNotEmpty) {
     if (kDebugMode) {
@@ -203,27 +204,43 @@ Future<void> _downloadCoreMLModel({
     }
     return;
   }
-  
-  // Clean up any partial downloads (including from previous attempts with different timestamps)
-  final destinationDir = Directory(destinationPath);
-  if (destinationDir.existsSync()) {
-    final tempDirs = destinationDir.listSync()
-        .whereType<Directory>()
-        .where((dir) => dir.path.contains('.$coreMLFileName.tmp'));
 
-    for (final tempDir in tempDirs) {
-      try {
-        tempDir.deleteSync(recursive: true);
-        if (kDebugMode) {
-          debugPrint('[CoreML] Cleaned up old temp directory: ${tempDir.path}');
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          debugPrint('[CoreML] Warning: Failed to clean up old temp directory: $e');
+  // Prevent concurrent downloads of the same model
+  if (_activeDownloads.contains(downloadKey)) {
+    if (kDebugMode) {
+      debugPrint('[CoreML] Download already in progress for ${model.modelName}, skipping duplicate request');
+    }
+    return;
+  }
+
+  // Mark this download as active
+  _activeDownloads.add(downloadKey);
+
+  try {
+    // Add timestamp to prevent race conditions with concurrent downloads
+    final timestamp = DateTime.now().millisecondsSinceEpoch;
+    final coreMLTempDir = Directory('$destinationPath/.$coreMLFileName.tmp.$timestamp');
+
+    // Clean up any partial downloads (including from previous attempts with different timestamps)
+    final destinationDir = Directory(destinationPath);
+    if (destinationDir.existsSync()) {
+      final tempDirs = destinationDir.listSync()
+          .whereType<Directory>()
+          .where((dir) => dir.path.contains('.$coreMLFileName.tmp'));
+
+      for (final tempDir in tempDirs) {
+        try {
+          tempDir.deleteSync(recursive: true);
+          if (kDebugMode) {
+            debugPrint('[CoreML] Cleaned up old temp directory: ${tempDir.path}');
+          }
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Warning: Failed to clean up old temp directory: $e');
+          }
         }
       }
     }
-  }
 
   if (coreMLDir.existsSync()) {
     try {
@@ -526,47 +543,61 @@ Future<void> _downloadCoreMLModel({
     // Check if ZIP extracted the .mlmodelc directory as a nested subdirectory
     // (Hugging Face ZIPs contain the .mlmodelc folder inside the archive)
     final topLevelEntries = coreMLTempDir.listSync(followLinks: false);
+
+    if (kDebugMode) {
+      debugPrint('[CoreML] Temp directory contains ${topLevelEntries.length} top-level entries');
+      for (final entry in topLevelEntries.take(5)) {
+        final type = entry is Directory ? 'DIR' : entry is File ? 'FILE' : 'LINK';
+        debugPrint('[CoreML]   - $type: ${entry.path.split('/').last}');
+      }
+    }
+
     final topLevelDirs = topLevelEntries.whereType<Directory>().toList();
 
     // If temp directory contains exactly one subdirectory with the .mlmodelc name,
     // we need to move its contents up one level
-    if (topLevelDirs.length == 1 && topLevelDirs.first.path.endsWith(coreMLFileName)) {
+    final nestedModelDir = topLevelDirs.where((dir) =>
+      dir.path.split('/').last == coreMLFileName
+    ).firstOrNull;
+
+    if (nestedModelDir != null) {
       if (kDebugMode) {
-        debugPrint('[CoreML] Detected nested .mlmodelc structure - flattening');
+        debugPrint('[CoreML] Detected nested .mlmodelc structure at: ${nestedModelDir.path}');
+        debugPrint('[CoreML] Moving nested directory directly to final location');
       }
 
-      final nestedDir = topLevelDirs.first;
-      final flattenTempDir = Directory('$destinationPath/.$coreMLFileName.flatten.$timestamp');
-
       try {
-        // Move the nested .mlmodelc directory to a temporary flatten location
-        nestedDir.renameSync(flattenTempDir.path);
+        // Directly rename the nested .mlmodelc directory to final location
+        nestedModelDir.renameSync(coreMLDir.path);
 
         // Delete now-empty temp directory
-        coreMLTempDir.deleteSync(recursive: true);
-
-        // Rename flatten directory to final location
-        flattenTempDir.renameSync(coreMLDir.path);
+        if (coreMLTempDir.existsSync()) {
+          coreMLTempDir.deleteSync(recursive: true);
+        }
 
         if (kDebugMode) {
-          debugPrint('[CoreML] Successfully flattened and moved nested structure');
+          debugPrint('[CoreML] Successfully moved nested .mlmodelc to final location');
         }
       } catch (e) {
         // Clean up on failure
-        if (flattenTempDir.existsSync()) {
-          try {
-            flattenTempDir.deleteSync(recursive: true);
-          } catch (_) {}
-        }
         if (coreMLTempDir.existsSync()) {
           try {
             coreMLTempDir.deleteSync(recursive: true);
           } catch (_) {}
         }
-        throw Exception('[CoreML] Failed to flatten nested structure: $e');
+        if (coreMLDir.existsSync()) {
+          try {
+            coreMLDir.deleteSync(recursive: true);
+          } catch (_) {}
+        }
+        throw Exception('[CoreML] Failed to move nested structure: $e');
       }
     } else {
-      // Normal case: temp directory already contains the correct structure
+      // Normal case: temp directory IS the .mlmodelc structure
+      if (kDebugMode) {
+        debugPrint('[CoreML] Flat structure detected - moving temp to final location');
+      }
+
       try {
         coreMLTempDir.renameSync(coreMLDir.path);
       } catch (e) {
@@ -594,7 +625,7 @@ Future<void> _downloadCoreMLModel({
       debugPrint('[CoreML] Failed to download CoreML model for ${model.modelName}: $e');
       debugPrint('[CoreML] CPU fallback will be used');
     }
-    
+
     // Clean up any partial downloads or temp directories
     if (coreMLTempDir.existsSync()) {
       try {
@@ -614,5 +645,8 @@ Future<void> _downloadCoreMLModel({
         }
       }
     }
+  } finally {
+    // Always remove from active downloads when done (success or failure)
+    _activeDownloads.remove(downloadKey);
   }
 }
