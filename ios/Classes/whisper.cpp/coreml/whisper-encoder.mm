@@ -12,6 +12,9 @@
 #import <mach/mach_host.h>
 #include <string.h>
 
+// Import for app state tracking
+#import "../WhisperMemoryHandler.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,6 +22,7 @@ extern "C" {
 struct whisper_coreml_context {
     MLModel * model;
     MLModelConfiguration * config;
+    BOOL useANE;  // Track if ANE is being used
 };
 
 struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
@@ -46,11 +50,20 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
     
     @try {
         NSURL *modelURL = [NSURL fileURLWithPath:modelPath];
-        
-        // Create model configuration with explicit compute units
+
+        // Create model configuration with adaptive compute units
         MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = MLComputeUnitsAll; // Use all available compute units including ANE
-        
+
+        // Check if app is in background - ANE unavailable, use CPU+GPU only
+        BOOL isBackground = [WhisperMemoryHandler isAppInBackground];
+        if (isBackground) {
+            config.computeUnits = MLComputeUnitsCPUAndGPU;
+            NSLog(@"[CoreML] App in background - using CPU+GPU only (ANE unavailable)");
+        } else {
+            config.computeUnits = MLComputeUnitsAll; // Use all available compute units including ANE
+            NSLog(@"[CoreML] App in foreground - using all compute units (including ANE)");
+        }
+
         NSError *error = nil;
         MLModel *model = [MLModel modelWithContentsOfURL:modelURL configuration:config error:&error];
         
@@ -159,11 +172,13 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
         whisper_coreml_context *ctx = new whisper_coreml_context();
         ctx->model = model;
         ctx->config = config;
-        
+        ctx->useANE = !isBackground;  // Track if ANE is being used
+
         NSLog(@"[CoreML] Successfully loaded model from: %@", modelPath);
         NSLog(@"[CoreML] Model inputs: %@", [description.inputDescriptionsByName.allKeys componentsJoinedByString:@", "]);
         NSLog(@"[CoreML] Model outputs: %@", [description.outputDescriptionsByName.allKeys componentsJoinedByString:@", "]);
-        
+        NSLog(@"[CoreML] Compute units: %@", isBackground ? @"CPU+GPU" : @"All (including ANE)");
+
         return ctx;
         
     } @catch (NSException *exception) {
@@ -234,8 +249,15 @@ int whisper_coreml_encode_with_dims(
     }
     
     @try {
+        // Check if app entered background during processing
+        BOOL isBackground = [WhisperMemoryHandler isAppInBackground];
+        if (isBackground && ctx->useANE) {
+            NSLog(@"[CoreML] App entered background while ANE model active - falling back to CPU");
+            return -1;  // Graceful CPU fallback
+        }
+
         NSLog(@"[CoreML] Starting encoder prediction...");
-        
+
         // Get model description to understand input/output shapes
         MLModelDescription *description = ctx->model.modelDescription;
         NSDictionary<NSString *, MLFeatureDescription *> *inputDescriptions = description.inputDescriptionsByName;
@@ -414,13 +436,23 @@ int whisper_coreml_encode_with_dims(
             return -1;
         }
         
-        // Run prediction
+        // Run prediction with ANE-specific error handling
         NSLog(@"[CoreML] Running model prediction...");
         id<MLFeatureProvider> result = [ctx->model predictionFromFeatures:provider error:&error];
-        
+
         if (!result || error) {
-            NSLog(@"[CoreML] Model prediction failed: %@ - using CPU fallback", 
-                  error ? error.localizedDescription : @"Unknown error");
+            NSString *errorMsg = error ? error.localizedDescription : @"Unknown error";
+
+            // Check for ANE-specific errors
+            if ([errorMsg containsString:@"ANE"] ||
+                [errorMsg containsString:@"ANEF"] ||
+                [errorMsg containsString:@"helper application"] ||
+                [errorMsg containsString:@"E5RT"]) {
+                NSLog(@"[CoreML] ANE communication error detected: %@ - this is expected during background transition", errorMsg);
+                NSLog(@"[CoreML] Falling back to CPU - transcription will continue");
+            } else {
+                NSLog(@"[CoreML] Model prediction failed: %@ - using CPU fallback", errorMsg);
+            }
             return -1;
         }
         
@@ -861,22 +893,34 @@ int whisper_coreml_encode_with_dims(
         return 0; // Success
     
     } @catch (NSException *exception) {
-        NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exception.reason);
-        
+        NSString *exceptionReason = exception.reason ?: @"Unknown";
+
+        // Check for ANE-specific exceptions
+        if ([exceptionReason containsString:@"ANE"] ||
+            [exceptionReason containsString:@"ANEF"] ||
+            [exceptionReason containsString:@"E5RT"] ||
+            [exceptionReason containsString:@"helper application"] ||
+            [exceptionReason containsString:@"MILCompiler"]) {
+            NSLog(@"[CoreML] ANE exception during background transition: %@ - this is expected", exceptionReason);
+            NSLog(@"[CoreML] Gracefully falling back to CPU - transcription will continue without crash");
+        } else {
+            NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exceptionReason);
+        }
+
         // SAFETY: Ensure output buffer is safe even on exception
         // Use conservative buffer size that works for both base (512) and large (1280)
         const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
         memset(out, 0, conservative_encoder_output_size);
-        
+
         return -1; // CPU fallback
     } @catch (...) {
         NSLog(@"[CoreML] Unknown exception during prediction - using CPU fallback");
-        
+
         // SAFETY: Handle any other exception type
         // Use conservative buffer size that works for both base (512) and large (1280)
         const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
         memset(out, 0, conservative_encoder_output_size);
-        
+
         return -1; // CPU fallback
     }
 }

@@ -14,6 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar;
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result;
 
+// App state tracking for ANE availability
++ (BOOL)isAppInBackground;
+
 @end
 
 NS_ASSUME_NONNULL_END

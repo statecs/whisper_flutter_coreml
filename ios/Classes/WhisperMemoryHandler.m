@@ -12,6 +12,9 @@
 @property (nonatomic, strong) FlutterMethodChannel* channel;
 @end
 
+// Global flag for app background state (accessible from C)
+static BOOL g_isAppInBackground = NO;
+
 @implementation WhisperMemoryHandler
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
@@ -21,15 +24,34 @@
     WhisperMemoryHandler* instance = [[WhisperMemoryHandler alloc] init];
     instance.channel = channel;
     [registrar addMethodCallDelegate:instance channel:channel];
-    
+
     // Setup memory warning observer
-    [[NSNotificationCenter defaultCenter] 
+    [[NSNotificationCenter defaultCenter]
         addObserver:instance
         selector:@selector(handleMemoryWarning:)
-        name:UIApplicationDidReceiveMemoryWarningNotification 
+        name:UIApplicationDidReceiveMemoryWarningNotification
         object:nil];
-    
-    NSLog(@"[Whisper Memory] Handler registered and memory warning observer setup");
+
+    // Setup app state observers for ANE availability tracking
+    [[NSNotificationCenter defaultCenter]
+        addObserver:instance
+        selector:@selector(handleAppWillResignActive:)
+        name:UIApplicationWillResignActiveNotification
+        object:nil];
+
+    [[NSNotificationCenter defaultCenter]
+        addObserver:instance
+        selector:@selector(handleAppDidEnterBackground:)
+        name:UIApplicationDidEnterBackgroundNotification
+        object:nil];
+
+    [[NSNotificationCenter defaultCenter]
+        addObserver:instance
+        selector:@selector(handleAppWillEnterForeground:)
+        name:UIApplicationWillEnterForegroundNotification
+        object:nil];
+
+    NSLog(@"[Whisper Memory] Handler registered with memory and app state observers");
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
@@ -60,12 +82,31 @@
 
 - (void)handleMemoryWarning:(NSNotification *)notification {
     NSLog(@"[Whisper Memory] iOS memory warning received - notifying Flutter");
-    
+
     // Trigger CoreML memory cleanup
     whisper_coreml_handle_memory_pressure();
-    
+
     // Notify Flutter about the memory warning
     [self.channel invokeMethod:@"memoryWarning" arguments:nil];
+}
+
+- (void)handleAppWillResignActive:(NSNotification *)notification {
+    NSLog(@"[Whisper Memory] App will resign active - ANE may become unavailable");
+    g_isAppInBackground = YES;
+}
+
+- (void)handleAppDidEnterBackground:(NSNotification *)notification {
+    NSLog(@"[Whisper Memory] App entered background - ANE unavailable, CPU fallback active");
+    g_isAppInBackground = YES;
+}
+
+- (void)handleAppWillEnterForeground:(NSNotification *)notification {
+    NSLog(@"[Whisper Memory] App entering foreground - ANE becoming available");
+    g_isAppInBackground = NO;
+}
+
++ (BOOL)isAppInBackground {
+    return g_isAppInBackground;
 }
 
 - (void)dealloc {
