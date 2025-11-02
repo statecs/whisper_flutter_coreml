@@ -198,11 +198,66 @@ Future<void> _downloadCoreMLModel({
   final downloadKey = '${model.modelName}@$destinationPath';
 
   // Check if CoreML model already exists and is valid
-  if (coreMLDir.existsSync() && coreMLDir.listSync().isNotEmpty) {
-    if (kDebugMode) {
-      debugPrint('[CoreML] Model already exists: ${coreMLDir.path}');
+  // Need to check if it's actually a directory (not a symlink or file)
+  if (coreMLDir.existsSync()) {
+    final entityType = FileSystemEntity.typeSync(coreMLDir.path, followLinks: false);
+
+    // If it's a symlink or file (not a proper directory), remove it and re-download
+    if (entityType == FileSystemEntityType.link || entityType == FileSystemEntityType.file) {
+      if (kDebugMode) {
+        final typeStr = entityType == FileSystemEntityType.link ? 'symlink' : 'file';
+        debugPrint('[CoreML] Found invalid $typeStr at model path, removing and re-downloading');
+      }
+      try {
+        if (entityType == FileSystemEntityType.link) {
+          Link(coreMLDir.path).deleteSync();
+        } else {
+          File(coreMLDir.path).deleteSync();
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Failed to remove invalid entity: $e');
+        }
+        // Continue to try download anyway
+      }
+    } else if (entityType == FileSystemEntityType.directory) {
+      // Verify it has valid CoreML files
+      final files = coreMLDir.listSync(recursive: true);
+      if (files.isNotEmpty) {
+        final hasMetadata = files.any((f) => f.path.endsWith('metadata.json'));
+        final hasCoreMLData = files.any((f) => f.path.endsWith('coremldata.bin'));
+        final hasModelMil = files.any((f) => f.path.endsWith('model.mil'));
+
+        if (hasMetadata && hasCoreMLData && hasModelMil) {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Valid model already exists: ${coreMLDir.path}');
+          }
+          return;
+        } else {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Model directory exists but is incomplete/corrupted, removing and re-downloading');
+          }
+          try {
+            coreMLDir.deleteSync(recursive: true);
+          } catch (e) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Failed to remove corrupted model: $e');
+            }
+          }
+        }
+      } else {
+        if (kDebugMode) {
+          debugPrint('[CoreML] Model directory exists but is empty, removing and re-downloading');
+        }
+        try {
+          coreMLDir.deleteSync(recursive: true);
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('[CoreML] Failed to remove empty directory: $e');
+          }
+        }
+      }
     }
-    return;
   }
 
   // Prevent concurrent downloads of the same model
@@ -567,6 +622,35 @@ Future<void> _downloadCoreMLModel({
       }
 
       try {
+        // Check if target path already exists (could be a symlink, file, or directory from previous run)
+        if (coreMLDir.existsSync()) {
+          final targetEntity = FileSystemEntity.typeSync(coreMLDir.path, followLinks: false);
+
+          if (kDebugMode) {
+            final typeStr = targetEntity == FileSystemEntityType.link ? 'symlink' :
+                           targetEntity == FileSystemEntityType.file ? 'file' :
+                           targetEntity == FileSystemEntityType.directory ? 'directory' : 'unknown';
+            debugPrint('[CoreML] Target path already exists as: $typeStr');
+            debugPrint('[CoreML] Removing existing entity before move');
+          }
+
+          // Delete existing symlink, file, or directory
+          try {
+            if (targetEntity == FileSystemEntityType.link) {
+              Link(coreMLDir.path).deleteSync();
+            } else if (targetEntity == FileSystemEntityType.file) {
+              File(coreMLDir.path).deleteSync();
+            } else if (targetEntity == FileSystemEntityType.directory) {
+              coreMLDir.deleteSync(recursive: true);
+            }
+          } catch (deleteError) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Warning: Failed to delete existing entity: $deleteError');
+            }
+            // Continue anyway - rename might still work
+          }
+        }
+
         // Directly rename the nested .mlmodelc directory to final location
         nestedModelDir.renameSync(coreMLDir.path);
 
@@ -599,6 +683,35 @@ Future<void> _downloadCoreMLModel({
       }
 
       try {
+        // Check if target path already exists (could be a symlink, file, or directory from previous run)
+        if (coreMLDir.existsSync()) {
+          final targetEntity = FileSystemEntity.typeSync(coreMLDir.path, followLinks: false);
+
+          if (kDebugMode) {
+            final typeStr = targetEntity == FileSystemEntityType.link ? 'symlink' :
+                           targetEntity == FileSystemEntityType.file ? 'file' :
+                           targetEntity == FileSystemEntityType.directory ? 'directory' : 'unknown';
+            debugPrint('[CoreML] Target path already exists as: $typeStr');
+            debugPrint('[CoreML] Removing existing entity before move');
+          }
+
+          // Delete existing symlink, file, or directory
+          try {
+            if (targetEntity == FileSystemEntityType.link) {
+              Link(coreMLDir.path).deleteSync();
+            } else if (targetEntity == FileSystemEntityType.file) {
+              File(coreMLDir.path).deleteSync();
+            } else if (targetEntity == FileSystemEntityType.directory) {
+              coreMLDir.deleteSync(recursive: true);
+            }
+          } catch (deleteError) {
+            if (kDebugMode) {
+              debugPrint('[CoreML] Warning: Failed to delete existing entity: $deleteError');
+            }
+            // Continue anyway - rename might still work
+          }
+        }
+
         coreMLTempDir.renameSync(coreMLDir.path);
       } catch (e) {
         // Clean up on move failure
