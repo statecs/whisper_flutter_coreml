@@ -113,46 +113,24 @@ class Whisper {
     final File modelFile = File(modelToInit.getPath(modelDir));
     final bool isModelExist = modelFile.existsSync();
     final bool hasCoreML = modelToInit.hasCoreMLModel(modelDir);
-    
+
     if (isModelExist) {
       if (kDebugMode) {
         debugPrint("Use existing model ${modelToInit.modelName} ${hasCoreML ? '(CoreML available)' : '(CPU only)'}");
       }
-      
-      // Even if the main model exists, check if we should download CoreML model
-      if (!hasCoreML && (Platform.isIOS || Platform.isMacOS)) {
-        if (kDebugMode) {
-          debugPrint("Attempting to download CoreML model for ${modelToInit.modelName}...");
-        }
-        await downloadModel(
-            model: modelToInit,
-            destinationPath: modelDir,
-            downloadHost: downloadHost,
-            downloadCoreML: true,
-            skipBinDownload: true,
-            onProgress: null);
-        
-        // Re-check CoreML availability after download
-        final bool hasCoreMLAfterDownload = modelToInit.hasCoreMLModel(modelDir);
-        if (kDebugMode) {
-          debugPrint("CoreML model availability after download: ${hasCoreMLAfterDownload ? 'Available' : 'Not available'}");
-        }
-      }
-      
+
       if (kDebugMode) {
         debugPrint("Model initialization complete for ${modelToInit.modelName}");
       }
       return;
     } else {
+      // Model not found - throw error so parent app knows to download
+      final String errorMsg = "Model ${modelToInit.modelName} not found at ${modelToInit.getPath(modelDir)}. "
+          "Please ensure the model is downloaded before initializing Whisper.";
       if (kDebugMode) {
-        debugPrint("Downloading model ${modelToInit.modelName}...");
+        debugPrint("[Whisper] ERROR: $errorMsg");
       }
-      await downloadModel(
-          model: modelToInit,
-          destinationPath: modelDir,
-          downloadHost: downloadHost,
-          downloadCoreML: Platform.isIOS || Platform.isMacOS,
-          onProgress: null);
+      throw Exception(errorMsg);
     }
   }
 
