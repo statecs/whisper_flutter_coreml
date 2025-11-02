@@ -14,16 +14,14 @@ enum WhisperModel {
 
   /// tiny model for all languages
   tiny("tiny", 39, 200),
-
   /// base model for all languages
   base("base-q8_0", 142, 300),
-
   /// small model for all languages
   small("small-q8_0", 466, 600),
   /// medium model for all languages
   medium("medium-q8_0", 1269, 1269),
   /// turbo model for all languages
-  turbo("large-v3-turbo-q8_0", 1536, 1536),
+  turbo("large-v3-turbo-q8_0", 2000, 2279),
   /// large model for all languages
   largeV1("large-v1", 3000, 3557),
   largeV2("large-v2", 3000, 3557),
