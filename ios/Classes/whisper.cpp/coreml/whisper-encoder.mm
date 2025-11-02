@@ -13,7 +13,7 @@
 #include <string.h>
 
 // Import for app state tracking
-#import "../WhisperMemoryHandler.h"
+#import "../../WhisperMemoryHandler.h"
 
 #ifdef __cplusplus
 extern "C" {
