@@ -493,7 +493,8 @@ Future<void> _downloadCoreMLModel({
       debugPrint('[CoreML] Extracted $extractedFiles files for ${model.modelName} CoreML model');
     }
 
-    // Validate the extraction by checking file count and required files
+    // Validate the extraction by checking for required files
+    // Note: .mlmodelc is a compiled CoreML package (directory structure)
     final tempFiles = coreMLTempDir.listSync(recursive: true);
     final fileCount = tempFiles.whereType<File>().length;
 
@@ -502,30 +503,28 @@ Future<void> _downloadCoreMLModel({
       throw Exception('[CoreML] Extracted model directory is empty for ${model.modelName}');
     }
 
-    // CoreML models should have at least 50 files (typically 100+)
-    if (fileCount < 50) {
-      if (kDebugMode) {
-        debugPrint('[CoreML] WARNING: Only $fileCount files extracted, expected 50+. Model may be corrupted.');
-        debugPrint('[CoreML] Files found: ${tempFiles.map((f) => f.path.split('/').last).take(10).join(', ')}...');
-      }
-      coreMLTempDir.deleteSync(recursive: true);
-      throw Exception('[CoreML] Insufficient files extracted ($fileCount), model is corrupted or incomplete');
-    }
-
     // Check for required CoreML files
     final hasMetadata = tempFiles.any((f) => f.path.endsWith('metadata.json'));
     final hasCoreMLData = tempFiles.any((f) => f.path.endsWith('coremldata.bin'));
+    final hasModelMil = tempFiles.any((f) => f.path.endsWith('model.mil'));
 
-    if (!hasMetadata || !hasCoreMLData) {
+    if (kDebugMode) {
+      debugPrint('[CoreML] Extracted $fileCount files for ${model.modelName} CoreML model');
+      debugPrint('[CoreML] Validation - metadata.json: $hasMetadata, coremldata.bin: $hasCoreMLData, model.mil: $hasModelMil');
+    }
+
+    // Validate presence of essential CoreML files
+    if (!hasMetadata || !hasCoreMLData || !hasModelMil) {
       if (kDebugMode) {
-        debugPrint('[CoreML] WARNING: Missing required files - metadata: $hasMetadata, coremldata: $hasCoreMLData');
+        debugPrint('[CoreML] ERROR: Missing required CoreML files');
+        debugPrint('[CoreML] Files found: ${tempFiles.map((f) => f.path.split('/').last).take(10).join(', ')}...');
       }
       coreMLTempDir.deleteSync(recursive: true);
-      throw Exception('[CoreML] Missing required CoreML files (metadata or coremldata.bin)');
+      throw Exception('[CoreML] Missing required CoreML files - metadata:$hasMetadata, coremldata:$hasCoreMLData, model.mil:$hasModelMil');
     }
 
     if (kDebugMode) {
-      debugPrint('[CoreML] Validation passed: $fileCount files, all required files present');
+      debugPrint('[CoreML] Validation passed: All required CoreML files present ($fileCount total files)');
     }
     
     // Atomically move from temp to final location
