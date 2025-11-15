@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'whisper_flutter_coreml'
-  s.version          = '1.0.1'
+  s.version          = '1.0.2'
   s.summary          = 'A Flutter FFI plugin for Whisper.cpp.'
   s.description      = <<-DESC
 A Flutter FFI plugin for Whisper.cpp.

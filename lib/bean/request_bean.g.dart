@@ -6,14 +6,13 @@ part of 'request_bean.dart';
 // JsonSerializableGenerator
 // **************************************************************************
 
-_$TranscribeRequestImpl _$$TranscribeRequestImplFromJson(
-        Map<String, dynamic> json) =>
-    _$TranscribeRequestImpl(
+_TranscribeRequest _$TranscribeRequestFromJson(Map<String, dynamic> json) =>
+    _TranscribeRequest(
       audio: json['audio'] as String,
       isTranslate: json['isTranslate'] as bool? ?? false,
-      threads: (json['threads'] as num?)?.toInt() ?? 8,
+      threads: (json['threads'] as num?)?.toInt() ?? 6,
       isVerbose: json['isVerbose'] as bool? ?? false,
-      language: json['language'] as String? ?? 'auto',
+      language: json['language'] as String? ?? "auto",
       isSpecialTokens: json['isSpecialTokens'] as bool? ?? false,
       isNoTimestamps: json['isNoTimestamps'] as bool? ?? false,
       nProcessors: (json['nProcessors'] as num?)?.toInt() ?? 1,
@@ -23,8 +22,7 @@ _$TranscribeRequestImpl _$$TranscribeRequestImplFromJson(
       speedUp: json['speedUp'] as bool? ?? false,
     );
 
-Map<String, dynamic> _$$TranscribeRequestImplToJson(
-        _$TranscribeRequestImpl instance) =>
+Map<String, dynamic> _$TranscribeRequestToJson(_TranscribeRequest instance) =>
     <String, dynamic>{
       'audio': instance.audio,
       'isTranslate': instance.isTranslate,
@@ -40,9 +38,9 @@ Map<String, dynamic> _$$TranscribeRequestImplToJson(
       'speedUp': instance.speedUp,
     };
 
-_$TranscribeRequestDtoImpl _$$TranscribeRequestDtoImplFromJson(
+_TranscribeRequestDto _$TranscribeRequestDtoFromJson(
         Map<String, dynamic> json) =>
-    _$TranscribeRequestDtoImpl(
+    _TranscribeRequestDto(
       audio: json['audio'] as String,
       model: json['model'] as String,
       isTranslate: json['is_translate'] as bool,
@@ -58,8 +56,8 @@ _$TranscribeRequestDtoImpl _$$TranscribeRequestDtoImplFromJson(
       speedUp: json['speed_up'] as bool,
     );
 
-Map<String, dynamic> _$$TranscribeRequestDtoImplToJson(
-        _$TranscribeRequestDtoImpl instance) =>
+Map<String, dynamic> _$TranscribeRequestDtoToJson(
+        _TranscribeRequestDto instance) =>
     <String, dynamic>{
       'audio': instance.audio,
       'model': instance.model,

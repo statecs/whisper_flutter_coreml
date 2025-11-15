@@ -38,6 +38,12 @@ int whisper_coreml_get_n_state(struct whisper_coreml_context * ctx);
 // Free CoreML context
 void whisper_coreml_free(struct whisper_coreml_context * ctx);
 
+// Memory management functions for crash prevention
+size_t whisper_coreml_get_available_memory(void);
+bool whisper_coreml_check_memory_sufficient(size_t required_bytes);
+void whisper_coreml_handle_memory_pressure(void);
+bool whisper_coreml_should_fallback_to_cpu(size_t buffer_size);
+
 #ifdef __cplusplus
 }
 #endif

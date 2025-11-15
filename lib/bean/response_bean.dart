@@ -1,9 +1,4 @@
 /*
- * Copyright (c) 田梓萱[小草林] 2021-2024.
- * All Rights Reserved.
- * All codes are protected by China's regulations on the protection of computer software, and infringement must be investigated.
- * 版权所有 (c) 田梓萱[小草林] 2021-2024.
- * 所有代码均受中国《计算机软件保护条例》保护，侵权必究.
  */
 import "package:freezed_annotation/freezed_annotation.dart";
 
@@ -11,7 +6,9 @@ part "response_bean.freezed.dart";
 part "response_bean.g.dart";
 
 @unfreezed
-class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
+abstract class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
+  WhisperTranscribeResponse._();
+  
   factory WhisperTranscribeResponse({
     @JsonKey(name: "@type") required String type,
     required String text,
@@ -24,8 +21,9 @@ class WhisperTranscribeResponse with _$WhisperTranscribeResponse {
 }
 
 @unfreezed
-class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
-  ///
+abstract class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
+  WhisperTranscribeSegment._();
+  
   factory WhisperTranscribeSegment({
     @JsonKey(
       name: "from_ts",
@@ -52,7 +50,9 @@ class WhisperTranscribeSegment with _$WhisperTranscribeSegment {
 }
 
 @unfreezed
-class WhisperVersionResponse with _$WhisperVersionResponse {
+abstract class WhisperVersionResponse with _$WhisperVersionResponse {
+  WhisperVersionResponse._();
+  
   factory WhisperVersionResponse({
     @JsonKey(name: "@type") required String type,
     required String message,
@@ -60,4 +60,18 @@ class WhisperVersionResponse with _$WhisperVersionResponse {
 
   factory WhisperVersionResponse.fromJson(Map<String, dynamic> json) =>
       _$WhisperVersionResponseFromJson(json);
+}
+
+@unfreezed
+abstract class WhisperMemoryStatusResponse with _$WhisperMemoryStatusResponse {
+  WhisperMemoryStatusResponse._();
+  
+  factory WhisperMemoryStatusResponse({
+    @JsonKey(name: "@type") required String type,
+    @JsonKey(name: "available_mb") required double availableMb,
+    required bool sufficient,
+  }) = _WhisperMemoryStatusResponse;
+
+  factory WhisperMemoryStatusResponse.fromJson(Map<String, dynamic> json) =>
+      _$WhisperMemoryStatusResponseFromJson(json);
 }

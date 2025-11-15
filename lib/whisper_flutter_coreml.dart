@@ -30,6 +30,66 @@ class Whisper {
   // override of model download host
   final String? downloadHost;
 
+  /// Get available memory in MB (iOS only)
+  Future<double> _getAvailableMemoryMB() async {
+    if (!Platform.isIOS) return 4096.0; // Assume 4GB on non-iOS
+    
+    try {
+      final Map<String, dynamic> result = await _request(
+        whisperRequest: const MemoryCheckRequest(),
+      );
+      
+      final WhisperMemoryStatusResponse response = WhisperMemoryStatusResponse.fromJson(result);
+      
+      if (kDebugMode) {
+        debugPrint('[Whisper Memory] Available: ${response.availableMb.toStringAsFixed(1)} MB');
+      }
+      
+      return response.availableMb;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[Whisper Memory] Error checking memory: $e - assuming 2GB available');
+      }
+      return 2048.0; // Conservative fallback
+    }
+  }
+  
+  /// Select the best model that can run with available memory
+  Future<WhisperModel> _selectOptimalModel(WhisperModel requestedModel) async {
+    final double availableMemoryMB = await _getAvailableMemoryMB();
+    final String modelDirPath = await _getModelDir();
+
+    // Check if CoreML is available for the requested model
+    final bool hasCoreML = requestedModel.hasCoreMLModel(modelDirPath);
+
+    if (kDebugMode) {
+      debugPrint('[Model Selection] Checking ${requestedModel.modelName} with ${hasCoreML ? "CoreML" : "CPU"} mode');
+    }
+
+    // First check if the requested model can run
+    if (requestedModel.canRunWithMemory(availableMemoryMB, hasCoreML: hasCoreML)) {
+      if (kDebugMode) {
+        debugPrint('[Model Selection] Requested model ${requestedModel.modelName} can run with ${availableMemoryMB.toInt()}MB');
+      }
+      return requestedModel;
+    }
+
+    // If not, find the best alternative (assume CoreML available for all if platform supports it)
+    final bool platformSupportsCoreML = Platform.isIOS || Platform.isMacOS;
+    final optimizedModel = WhisperModel.getBestModelForMemory(
+      availableMemoryMB,
+      hasCoreML: platformSupportsCoreML,
+    );
+
+    if (optimizedModel != requestedModel) {
+      if (kDebugMode) {
+        debugPrint('[Model Selection] Downgraded from ${requestedModel.modelName} to ${optimizedModel.modelName} due to memory constraints');
+      }
+    }
+
+    return optimizedModel;
+  }
+
   DynamicLibrary _openLib() {
     if (Platform.isAndroid) {
       return DynamicLibrary.open("libwhisper.so");
@@ -48,26 +108,61 @@ class Whisper {
     return libraryDirectory.path;
   }
 
-  Future<void> _initModel() async {
+  Future<void> _initModel(WhisperModel modelToInit) async {
     final String modelDir = await _getModelDir();
-    final File modelFile = File(model.getPath(modelDir));
+    final File modelFile = File(modelToInit.getPath(modelDir));
     final bool isModelExist = modelFile.existsSync();
+    final bool hasCoreML = modelToInit.hasCoreMLModel(modelDir);
+    
     if (isModelExist) {
       if (kDebugMode) {
-        debugPrint("Use existing model ${model.modelName}");
+        debugPrint("Use existing model ${modelToInit.modelName} ${hasCoreML ? '(CoreML available)' : '(CPU only)'}");
+      }
+      
+      // Even if the main model exists, check if we should download CoreML model
+      if (!hasCoreML && (Platform.isIOS || Platform.isMacOS)) {
+        if (kDebugMode) {
+          debugPrint("Attempting to download CoreML model for ${modelToInit.modelName}...");
+        }
+        await downloadModel(
+            model: modelToInit,
+            destinationPath: modelDir,
+            downloadHost: downloadHost,
+            downloadCoreML: true,
+            skipBinDownload: true,
+            onProgress: null);
+        
+        // Re-check CoreML availability after download
+        final bool hasCoreMLAfterDownload = modelToInit.hasCoreMLModel(modelDir);
+        if (kDebugMode) {
+          debugPrint("CoreML model availability after download: ${hasCoreMLAfterDownload ? 'Available' : 'Not available'}");
+        }
+      }
+      
+      if (kDebugMode) {
+        debugPrint("Model initialization complete for ${modelToInit.modelName}");
       }
       return;
     } else {
+      if (kDebugMode) {
+        debugPrint("Downloading model ${modelToInit.modelName}...");
+      }
       await downloadModel(
-          model: model, destinationPath: modelDir, downloadHost: downloadHost);
+          model: modelToInit,
+          destinationPath: modelDir,
+          downloadHost: downloadHost,
+          downloadCoreML: Platform.isIOS || Platform.isMacOS,
+          onProgress: null);
     }
   }
 
   Future<Map<String, dynamic>> _request({
     required WhisperRequestDto whisperRequest,
+    WhisperModel? specificModel,
   }) async {
-    if (model != WhisperModel.none) {
-      await _initModel();
+    final modelToUse = specificModel ?? model;
+    if (modelToUse != WhisperModel.none) {
+      await _initModel(modelToUse);
     }
     return Isolate.run(
       () async {
@@ -94,12 +189,18 @@ class Whisper {
   Future<WhisperTranscribeResponse> transcribe({
     required TranscribeRequest transcribeRequest,
   }) async {
+    // Select optimal model based on available memory - MUST be done in main isolate
+    final optimalModel = await _selectOptimalModel(model);
+    
     final String modelDir = await _getModelDir();
+    
+    // Note: Background isolate cannot access method channels, so model selection is done above
     final Map<String, dynamic> result = await _request(
       whisperRequest: TranscribeRequestDto.fromTranscribeRequest(
         transcribeRequest,
-        model.getPath(modelDir),
+        optimalModel.getPath(modelDir),
       ),
+      specificModel: optimalModel,
     );
     if (kDebugMode) {
       debugPrint("Transcribe request $result");
@@ -123,5 +224,13 @@ class Whisper {
       result,
     );
     return response.message;
+  }
+
+  /// Check if CoreML model is available for hardware acceleration
+  Future<bool> hasCoreMLSupport() async {
+    if (!Platform.isIOS && !Platform.isMacOS) return false;
+    
+    final String modelDir = await _getModelDir();
+    return model.hasCoreMLModel(modelDir);
   }
 }

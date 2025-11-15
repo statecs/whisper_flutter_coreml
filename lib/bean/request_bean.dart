@@ -7,7 +7,9 @@ part "request_bean.freezed.dart";
 part "request_bean.g.dart";
 
 @unfreezed
-class TranscribeRequest with _$TranscribeRequest {
+abstract class TranscribeRequest with _$TranscribeRequest {
+  TranscribeRequest._();
+  
   factory TranscribeRequest({
     required String audio,
     @Default(false) bool isTranslate,
@@ -22,12 +24,14 @@ class TranscribeRequest with _$TranscribeRequest {
     @Default(false) bool diarize,
     @Default(false) bool speedUp,
   }) = _TranscribeRequest;
+  
   factory TranscribeRequest.fromJson(Map<String, dynamic> json) =>
       _$TranscribeRequestFromJson(json);
 }
 
+
 @freezed
-class TranscribeRequestDto
+abstract class TranscribeRequestDto
     with _$TranscribeRequestDto
     implements WhisperRequestDto {
   const factory TranscribeRequestDto({
@@ -92,6 +96,22 @@ class VersionRequest with _$VersionRequest implements WhisperRequestDto {
 
   @override
   String get specialType => "getVersion";
+
+  @override
+  String toRequestString() {
+    return json.encode({
+      "@type": specialType,
+    });
+  }
+}
+
+@freezed
+class MemoryCheckRequest with _$MemoryCheckRequest implements WhisperRequestDto {
+  const factory MemoryCheckRequest() = _MemoryCheckRequest;
+  const MemoryCheckRequest._();
+
+  @override
+  String get specialType => "checkMemory";
 
   @override
   String toRequestString() {

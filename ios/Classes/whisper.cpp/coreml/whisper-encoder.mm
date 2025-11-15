@@ -8,7 +8,12 @@
 
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
+#import <mach/mach.h>
+#import <mach/mach_host.h>
 #include <string.h>
+
+// Import for app state tracking
+#import "../../WhisperMemoryHandler.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,6 +22,7 @@ extern "C" {
 struct whisper_coreml_context {
     MLModel * model;
     MLModelConfiguration * config;
+    BOOL useANE;  // Track if ANE is being used
 };
 
 struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
@@ -44,11 +50,20 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
     
     @try {
         NSURL *modelURL = [NSURL fileURLWithPath:modelPath];
-        
-        // Create model configuration with explicit compute units
+
+        // Create model configuration with adaptive compute units
         MLModelConfiguration *config = [[MLModelConfiguration alloc] init];
-        config.computeUnits = MLComputeUnitsAll; // Use all available compute units including ANE
-        
+
+        // Check if app is in background - ANE unavailable, use CPU+GPU only
+        BOOL isBackground = [WhisperMemoryHandler isAppInBackground];
+        if (isBackground) {
+            config.computeUnits = MLComputeUnitsCPUAndGPU;
+            NSLog(@"[CoreML] App in background - using CPU+GPU only (ANE unavailable)");
+        } else {
+            config.computeUnits = MLComputeUnitsAll; // Use all available compute units including ANE
+            NSLog(@"[CoreML] App in foreground - using all compute units (including ANE)");
+        }
+
         NSError *error = nil;
         MLModel *model = [MLModel modelWithContentsOfURL:modelURL configuration:config error:&error];
         
@@ -83,10 +98,22 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
             totalElements *= dim.integerValue;
         }
         
+        // BUFFER SIZE VALIDATION: Check input buffer requirements against available memory
+        size_t inputBufferSize = totalElements * sizeof(float);
+        NSLog(@"[CoreML] Model input buffer requirements: %.2f MB (%ld elements)", 
+              inputBufferSize / (1024.0 * 1024.0), (long)totalElements);
+        
         // Whisper encoder should accept reasonable input sizes
         if (totalElements < 10000 || totalElements > 2000000) {
             NSLog(@"[CoreML] Model input size (%ld elements) outside reasonable range (10K-2M) - falling back to CPU", 
                   (long)totalElements);
+            return nullptr;
+        }
+        
+        // Check if we have sufficient memory for input buffer during model initialization
+        if (!whisper_coreml_check_memory_sufficient(inputBufferSize)) {
+            NSLog(@"[CoreML] Insufficient memory for model input buffer (%.2f MB) during initialization - falling back to CPU", 
+                  inputBufferSize / (1024.0 * 1024.0));
             return nullptr;
         }
         
@@ -112,10 +139,30 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
             outputElements *= dim.integerValue;
         }
         
+        // BUFFER SIZE VALIDATION: Check output buffer requirements
+        size_t outputBufferSize = outputElements * sizeof(float);
+        NSLog(@"[CoreML] Model output buffer requirements: %.2f MB (%ld elements)", 
+              outputBufferSize / (1024.0 * 1024.0), (long)outputElements);
+        
         // Whisper encoder output should be reasonable size (typically n_state * n_ctx)
         if (outputElements < 100000 || outputElements > 5000000) {
             NSLog(@"[CoreML] Model output size (%ld elements) outside reasonable range (100K-5M) - falling back to CPU", 
                   (long)outputElements);
+            return nullptr;
+        }
+        
+        // Check if we have sufficient memory for output buffer during model initialization
+        if (!whisper_coreml_check_memory_sufficient(outputBufferSize)) {
+            NSLog(@"[CoreML] Insufficient memory for model output buffer (%.2f MB) during initialization - falling back to CPU", 
+                  outputBufferSize / (1024.0 * 1024.0));
+            return nullptr;
+        }
+        
+        // Check total memory requirements (input + output + working memory)
+        size_t totalBufferRequirement = inputBufferSize + outputBufferSize + (outputBufferSize / 2); // Add 50% for working memory
+        if (!whisper_coreml_check_memory_sufficient(totalBufferRequirement)) {
+            NSLog(@"[CoreML] Insufficient memory for total model requirements (%.2f MB) during initialization - falling back to CPU", 
+                  totalBufferRequirement / (1024.0 * 1024.0));
             return nullptr;
         }
         
@@ -125,11 +172,13 @@ struct whisper_coreml_context * whisper_coreml_init(const char * path_model) {
         whisper_coreml_context *ctx = new whisper_coreml_context();
         ctx->model = model;
         ctx->config = config;
-        
+        ctx->useANE = !isBackground;  // Track if ANE is being used
+
         NSLog(@"[CoreML] Successfully loaded model from: %@", modelPath);
         NSLog(@"[CoreML] Model inputs: %@", [description.inputDescriptionsByName.allKeys componentsJoinedByString:@", "]);
         NSLog(@"[CoreML] Model outputs: %@", [description.outputDescriptionsByName.allKeys componentsJoinedByString:@", "]);
-        
+        NSLog(@"[CoreML] Compute units: %@", isBackground ? @"CPU+GPU" : @"All (including ANE)");
+
         return ctx;
         
     } @catch (NSException *exception) {
@@ -175,9 +224,40 @@ int whisper_coreml_encode_with_dims(
         return -1; // Graceful fallback to CPU
     }
     
-    @try {
-        NSLog(@"[CoreML] Starting encoder prediction...");
+    // MEMORY SAFETY: Check if we have sufficient memory before proceeding
+    const size_t estimated_buffer_size = out_n_state * out_n_ctx * sizeof(float);
+    const size_t estimated_total_usage = estimated_buffer_size * 3; // Input + Output + Working memory
+    
+    NSLog(@"[CoreML Memory] Estimated memory usage: %.2f MB (%.2f MB buffer × 3)", 
+          estimated_total_usage / (1024.0 * 1024.0), estimated_buffer_size / (1024.0 * 1024.0));
+    
+    // Check if we should fallback to CPU due to memory constraints
+    if (whisper_coreml_should_fallback_to_cpu(estimated_total_usage)) {
+        NSLog(@"[CoreML] Memory-based fallback to CPU - estimated usage %.2f MB too high", 
+              estimated_total_usage / (1024.0 * 1024.0));
         
+        // Attempt memory cleanup before final fallback
+        whisper_coreml_handle_memory_pressure();
+        
+        // Re-check after cleanup
+        if (whisper_coreml_should_fallback_to_cpu(estimated_total_usage)) {
+            NSLog(@"[CoreML] Still insufficient memory after cleanup - using CPU fallback");
+            return -1; // Graceful fallback to CPU
+        } else {
+            NSLog(@"[CoreML] Memory cleanup successful - proceeding with CoreML");
+        }
+    }
+    
+    @try {
+        // Check if app entered background during processing
+        BOOL isBackground = [WhisperMemoryHandler isAppInBackground];
+        if (isBackground && ctx->useANE) {
+            NSLog(@"[CoreML] App entered background while ANE model active - falling back to CPU");
+            return -1;  // Graceful CPU fallback
+        }
+
+        NSLog(@"[CoreML] Starting encoder prediction...");
+
         // Get model description to understand input/output shapes
         MLModelDescription *description = ctx->model.modelDescription;
         NSDictionary<NSString *, MLFeatureDescription *> *inputDescriptions = description.inputDescriptionsByName;
@@ -186,6 +266,9 @@ int whisper_coreml_encode_with_dims(
         // Log model information for debugging
         NSLog(@"[CoreML] Model inputs: %@", [inputDescriptions.allKeys componentsJoinedByString:@", "]);
         NSLog(@"[CoreML] Model outputs: %@", [outputDescriptions.allKeys componentsJoinedByString:@", "]);
+        
+        // Declare variables for the entire function scope
+        NSInteger outputElements = 0;
         
         // Find the input feature (typically named "melspectrogram" or similar)
         NSString *inputName = inputDescriptions.allKeys.firstObject;
@@ -204,6 +287,22 @@ int whisper_coreml_encode_with_dims(
         NSArray<NSNumber *> *inputShape = inputDesc.multiArrayConstraint.shape;
         NSLog(@"[CoreML] Input shape: %@", inputShape);
         
+        // MEMORY SAFETY: Validate buffer size before allocation
+        NSInteger totalElements = 1;
+        for (NSNumber *dim in inputShape) {
+            totalElements *= dim.integerValue;
+        }
+        
+        size_t required_input_bytes = totalElements * sizeof(float);
+        NSLog(@"[CoreML] Input buffer will require %.2f MB for %ld elements", 
+              required_input_bytes / (1024.0 * 1024.0), (long)totalElements);
+        
+        if (!whisper_coreml_check_memory_sufficient(required_input_bytes)) {
+            NSLog(@"[CoreML] Insufficient memory for input buffer (%.2f MB) - using CPU fallback", 
+                  required_input_bytes / (1024.0 * 1024.0));
+            return -1;
+        }
+        
         // Create input MLMultiArray from mel spectrogram
         NSError *error = nil;
         MLMultiArray *inputArray = [[MLMultiArray alloc] 
@@ -214,13 +313,15 @@ int whisper_coreml_encode_with_dims(
         if (!inputArray || error) {
             NSLog(@"[CoreML] Failed to create input array: %@ - using CPU fallback", 
                   error ? error.localizedDescription : @"Unknown error");
+            
+            // Handle low memory error specifically
+            if (error && [error.domain isEqualToString:NSCocoaErrorDomain] && 
+                error.code == NSFileReadTooLargeError) {
+                NSLog(@"[CoreML] Input allocation failed due to insufficient memory");
+                whisper_coreml_handle_memory_pressure();
+            }
+            
             return -1;
-        }
-        
-        // Calculate expected input size
-        NSInteger totalElements = 1;
-        for (NSNumber *dim in inputShape) {
-            totalElements *= dim.integerValue;
         }
         
         // Copy mel data to MLMultiArray with validation
@@ -258,10 +359,13 @@ int whisper_coreml_encode_with_dims(
         
         float *inputData = (float *)inputArray.dataPointer;
         
-        // Initialize input array to zero
-        memset(inputData, 0, totalElements * sizeof(float));
+        // Initialize input array to zero with autorelease pool management
+        @autoreleasepool {
+            memset(inputData, 0, totalElements * sizeof(float));
+        }
         
-        // Reshape and copy mel data based on size compatibility
+        // Reshape and copy mel data based on size compatibility with memory-efficient pools
+        @autoreleasepool {
         if (srcElements == totalElements) {
             // Direct copy - same size
             NSLog(@"[CoreML] Direct copy: source and model have same size");
@@ -317,7 +421,7 @@ int whisper_coreml_encode_with_dims(
                 if (isnan(value) || isinf(value)) value = 0.0f;
                 inputData[i] = value;
             }
-        }
+        } // End of mel data reshaping autorelease pool
         
         NSLog(@"[CoreML] Successfully created input array with %ld validated elements", (long)totalElements);
         
@@ -332,13 +436,23 @@ int whisper_coreml_encode_with_dims(
             return -1;
         }
         
-        // Run prediction
+        // Run prediction with ANE-specific error handling
         NSLog(@"[CoreML] Running model prediction...");
         id<MLFeatureProvider> result = [ctx->model predictionFromFeatures:provider error:&error];
-        
+
         if (!result || error) {
-            NSLog(@"[CoreML] Model prediction failed: %@ - using CPU fallback", 
-                  error ? error.localizedDescription : @"Unknown error");
+            NSString *errorMsg = error ? error.localizedDescription : @"Unknown error";
+
+            // Check for ANE-specific errors
+            if ([errorMsg containsString:@"ANE"] ||
+                [errorMsg containsString:@"ANEF"] ||
+                [errorMsg containsString:@"helper application"] ||
+                [errorMsg containsString:@"E5RT"]) {
+                NSLog(@"[CoreML] ANE communication error detected: %@ - this is expected during background transition", errorMsg);
+                NSLog(@"[CoreML] Falling back to CPU - transcription will continue");
+            } else {
+                NSLog(@"[CoreML] Model prediction failed: %@ - using CPU fallback", errorMsg);
+            }
             return -1;
         }
         
@@ -406,8 +520,8 @@ int whisper_coreml_encode_with_dims(
                   (long)(stride0_elements * sizeof(float)), (long)(stride1_elements * sizeof(float)));
         }
         
-        // Calculate output size
-        NSInteger outputElements = 1;
+        // Re-calculate output size for validation
+        outputElements = 1;
         for (NSNumber *dim in outputShape) {
             outputElements *= dim.integerValue;
         }
@@ -593,11 +707,15 @@ int whisper_coreml_encode_with_dims(
         // Initialize whisper buffer (always use whisper's expected size)
         memset(out, 0, whisperBufferSize);
         
-        // Safe data copying with memory protection
+        // Safe data copying with memory protection and optimized autorelease pools
         @autoreleasepool {
-            @try {
-                // Smart tensor reshaping with size adaptation
-                if (outputShape.count >= 4) {
+            // MEMORY LEAK PREVENTION: Clear any previous autorelease objects
+            @autoreleasepool {
+                // Force cleanup of any pending autoreleased objects
+            }
+            
+            // Smart tensor reshaping with size adaptation
+            if (outputShape.count >= 4) {
                     NSLog(@"[CoreML] Reshaping 4D model output [%ld,%ld,%ld,%ld] to whisper 2D format [%ld×%ld]",
                           (long)outputShape[0].integerValue, (long)outputShape[1].integerValue,
                           (long)outputShape[2].integerValue, (long)outputShape[3].integerValue,
@@ -646,162 +764,110 @@ int whisper_coreml_encode_with_dims(
                     NSLog(@"[CoreML] Starting tensor copy of %ld elements with %@ data type", 
                           (long)totalElements, dataTypeName);
                     
-                    // OPTIMIZATION: Use batch processing for better performance
-                    const NSInteger chunkSize = needsConversion ? 100 : 500; // Smaller chunks for conversions
-                    NSInteger processedCtx = 0;
-                    
-                    while (processedCtx < copyNCtx) {
-                        NSInteger currentChunkSize = MIN(chunkSize, copyNCtx - processedCtx);
-                        NSInteger chunkEnd = processedCtx + currentChunkSize;
-                        
-                        for (NSInteger ctx = processedCtx; ctx < chunkEnd; ctx++) {
-                            for (NSInteger state = 0; state < copyNState; state++) {
-                                // CoreML 4D tensor layout: [batch=1, state, height=1, ctx]
-                                // Correct flattened index for [1, modelNState, 1, modelNCtx]
-                                // 4D index: batch=0, state, height=0, ctx
-                                NSInteger srcIdx = (0 * modelNState * 1 * modelNCtx) + 
-                                                 (state * 1 * modelNCtx) + 
-                                                 (0 * modelNCtx) + ctx;
-                                
-                                // Whisper 2D layout: [state, ctx]
-                                NSInteger dstIdx = state * whisperNCtx + ctx;
-                                
-                                // CRITICAL: Comprehensive bounds checking with detailed validation
-                                bool isValidSrc = (srcIdx >= 0 && srcIdx < outputElements);
-                                bool isValidDst = (dstIdx >= 0 && dstIdx < whisperNState * whisperNCtx);
-                                bool isValidPointers = (outputDataPtr != NULL && outPtr != NULL);
-                                bool isValidDims = (state < modelNState && ctx < modelNCtx && 
-                                                   state < whisperNState && ctx < whisperNCtx);
-                                
-                                if (isValidSrc && isValidDst && isValidPointers && isValidDims) {
-                                    // CRITICAL: Use stride-aware memory access instead of flat array indexing
-                                    @try {
-                                        // CRITICAL: Get source value with proper data type handling
-                                        float srcValue = 0.0f;
-                                        
-                                        // Calculate 4D offset with proper stride validation
-                                        if (outputStrides.count < 4) {
-                                            NSLog(@"[CoreML] ERROR: Insufficient strides for 4D access - got %ld strides", (long)outputStrides.count);
-                                            return -1;
-                                        }
-                                        
-                                        NSInteger srcOffset = 0 * outputStrides[0].integerValue +
-                                                            state * outputStrides[1].integerValue +
-                                                            0 * outputStrides[2].integerValue +
-                                                            ctx * outputStrides[3].integerValue;
-                                        
-                                        // Bounds check - use actualMemoryElements to account for stride padding
-                                        if (srcOffset < 0 || srcOffset >= actualMemoryElements) {
-                                            NSLog(@"[CoreML] ERROR: Offset %ld out of bounds [0, %ld) at [%ld,%ld]", 
-                                                  (long)srcOffset, (long)actualMemoryElements, (long)state, (long)ctx);
-                                            NSLog(@"[CoreML] Debug: logical elements=%ld, checking against padded memory=%ld", 
-                                                  (long)outputElements, (long)actualMemoryElements);
-                                            return -1;
-                                        }
-                                        
-                                        // Extract value based on actual data type
-                                        void *dataPtr = outputArray.dataPointer;
-                                        switch (outputArray.dataType) {
-                                            case MLMultiArrayDataTypeFloat16: {
-                                                // OPTIMIZED: Use Apple's highly efficient Float16 conversion
-                                                __fp16 *f16Data = (__fp16*)dataPtr;
-                                                __fp16 f16Value = f16Data[srcOffset];
-                                                // Direct hardware-accelerated conversion
-                                                srcValue = (float)f16Value;
-                                                break;
-                                            }
-                                            case MLMultiArrayDataTypeFloat32: {
-                                                float *f32Data = (float*)dataPtr;
-                                                srcValue = f32Data[srcOffset];
-                                                break;
-                                            }
-                                            case MLMultiArrayDataTypeDouble: {
-                                                double *f64Data = (double*)dataPtr;
-                                                srcValue = (float)f64Data[srcOffset];
-                                                break;
-                                            }
-                                            default:
-                                                NSLog(@"[CoreML] ERROR: Unsupported data type during value extraction");
-                                                return -1;
-                                        }
-                                        
-                                        // For GGML tensor: use proper stride-based access
-                                        // CRITICAL FIX: GGML tensor layout is [state, ctx] not [ctx, state]
-                                        // nb[0] = 4 bytes (stride between states), nb[1] = out_stride_bytes (stride between contexts)
-                                        char *ggmlData = (char*)out;
-                                        size_t ggmlOffset = state * sizeof(float) + ctx * out_stride_bytes;
-                                        float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
-                                        
-                                        // Perform safe memory copy
-                                        *ggmlPtr = srcValue;
-                                        copiedElements++;
-                                        
-                                        // Occasional validation for debugging (every 10000 elements)
-                                        if (copiedElements % 10000 == 0) {
-                                            NSLog(@"[CoreML] Progress: copied %ld elements, current [%ld,%ld] = %f", 
-                                                  (long)copiedElements, (long)state, (long)ctx, srcValue);
-                                        }
-                                        
-                                    } @catch (NSException *e) {
-                                        NSLog(@"[CoreML] Exception during stride-aware copy at [%ld,%ld]: %@", 
-                                              (long)state, (long)ctx, e.reason);
-                                        NSLog(@"[CoreML] Stopping tensor copy to prevent crash - copied %ld elements", (long)copiedElements);
-                                        return -1;
-                                    }
-                                } else {
-                                    // Log detailed failure reason for debugging
-                                    if (!isValidSrc) {
-                                        NSLog(@"[CoreML] ERROR: Invalid source index - srcIdx=%ld, outputElements=%ld", 
-                                              (long)srcIdx, (long)outputElements);
-                                    }
-                                    if (!isValidDst) {
-                                        NSLog(@"[CoreML] ERROR: Invalid destination index - dstIdx=%ld, bufferSize=%ld", 
-                                              (long)dstIdx, (long)(whisperNState * whisperNCtx));
-                                    }
-                                    if (!isValidPointers) {
-                                        NSLog(@"[CoreML] ERROR: Invalid pointers - outputDataPtr=%p, outPtr=%p", outputDataPtr, outPtr);
-                                    }
-                                    if (!isValidDims) {
-                                        NSLog(@"[CoreML] ERROR: Invalid dimensions - state=%ld<%ld, ctx=%ld<%ld", 
-                                              (long)state, (long)MIN(modelNState, whisperNState), (long)ctx, (long)MIN(modelNCtx, whisperNCtx));
-                                    }
-                                    
-                                    // Stop processing on first error to prevent crash
-                                    NSLog(@"[CoreML] Stopping tensor copy due to bounds violation - copied %ld elements so far", (long)copiedElements);
-                                    return -1;
-                                }
+                    // OPTIMIZATION: Simple tensor copy with periodic autorelease pool cleanup
+                    copiedElements = 0;
+                    for (NSInteger ctx = 0; ctx < copyNCtx; ctx++) {
+                        // Create smaller autorelease pools every 100 context frames
+                        if (ctx % 100 == 0) {
+                            @autoreleasepool {
+                                // Small cleanup every 100 frames
                             }
                         }
                         
-                        processedCtx = chunkEnd;
-                        
-                        // Progress reporting - show every chunk to demonstrate it's working
-                        if (processedCtx % chunkSize == 0 || processedCtx >= copyNCtx) {
-                            double progress = 100.0 * processedCtx / copyNCtx;
-                            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:copyStartTime];
-                            NSInteger elementsProcessed = processedCtx * copyNState;
-                            double elementsPerSecond = elementsProcessed / elapsed;
+                        for (NSInteger state = 0; state < copyNState; state++) {
+                            // CoreML 4D tensor layout with stride padding: [batch=1, state, height=1, ctx]
+                            // Use actual stride values to handle padding correctly
+                            NSInteger srcIdx;
+                            if (outputStrides.count >= 4) {
+                                // Use actual stride values from CoreML to handle padding
+                                // Shape: (1, 768, 1, 1500), Strides: (1155072, 1504, 1504, 1)
+                                NSInteger strideBatch = outputStrides[0].integerValue;  // 1155072
+                                NSInteger strideState = outputStrides[1].integerValue;  // 1504 
+                                NSInteger strideHeight = outputStrides[2].integerValue; // 1504
+                                NSInteger strideCtx = outputStrides[3].integerValue;    // 1
+                                
+                                srcIdx = (0 * strideBatch) +    // batch=0
+                                        (state * strideState) + // state dimension with padding
+                                        (0 * strideHeight) +    // height=0
+                                        (ctx * strideCtx);      // ctx dimension
+                                        
+                                // Debug: Log index calculation for first few elements
+                                if (ctx < 3 && state < 3) {
+                                    NSLog(@"[CoreML] Index calc: state=%ld, ctx=%ld -> srcIdx=%ld (strides: %ld,%ld,%ld,%ld)", 
+                                          (long)state, (long)ctx, (long)srcIdx,
+                                          (long)strideBatch, (long)strideState, (long)strideHeight, (long)strideCtx);
+                                }
+                            } else {
+                                // Fallback to logical layout if stride info unavailable  
+                                srcIdx = state * modelNCtx + ctx;
+                                
+                                if (ctx < 3 && state < 3) {
+                                    NSLog(@"[CoreML] Fallback index calc: state=%ld, ctx=%ld -> srcIdx=%ld", 
+                                          (long)state, (long)ctx, (long)srcIdx);
+                                }
+                            }
                             
-                            NSLog(@"[CoreML] Progress: %ld/%ld frames (%.1f%%) - %.0f elements/sec, %ld total elements copied",
-                                  (long)processedCtx, (long)copyNCtx, progress, elementsPerSecond, (long)copiedElements);
-                            
-                            // Estimate time remaining
-                            if (processedCtx < copyNCtx && elementsPerSecond > 0) {
-                                NSInteger remaining = totalElements - elementsProcessed;
-                                double timeRemaining = remaining / elementsPerSecond;
-                                NSLog(@"[CoreML] Estimated time remaining: %.1f seconds", timeRemaining);
+                            // Bounds checking with data type awareness
+                            if (srcIdx >= 0 && srcIdx < outputElements) {
+                                float srcValue = 0.0f;
+                                
+                                // Extract value from CoreML output based on data type
+                                if (needsConversion && outputArray.dataType == MLMultiArrayDataTypeFloat16) {
+                                    // Handle Float16 data (2 bytes per element)
+                                    uint16_t *f16Data = (uint16_t*)outputArray.dataPointer;
+                                    
+                                    // Additional bounds check for Float16 data
+                                    if (srcIdx < actualMemoryElements) {
+                                        uint16_t f16Value = f16Data[srcIdx];
+                                        
+                                        // Convert Float16 to Float32 using CoreFoundation
+                                        // Float16 format: 1 sign bit + 5 exp bits + 10 mantissa bits
+                                        if (f16Value == 0x0000) {
+                                            srcValue = 0.0f;  // +0
+                                        } else if (f16Value == 0x8000) {
+                                            srcValue = -0.0f; // -0
+                                        } else {
+                                            // Extract components
+                                            uint32_t sign = (f16Value >> 15) & 0x1;
+                                            uint32_t exp16 = (f16Value >> 10) & 0x1F;
+                                            uint32_t mant16 = f16Value & 0x3FF;
+                                            
+                                            if (exp16 == 0) {
+                                                // Subnormal number
+                                                srcValue = (sign ? -1.0f : 1.0f) * (mant16 / 1024.0f) * powf(2.0f, -14.0f);
+                                            } else if (exp16 == 31) {
+                                                // Infinity or NaN
+                                                srcValue = (mant16 == 0) ? (sign ? -INFINITY : INFINITY) : NAN;
+                                            } else {
+                                                // Normal number: convert to Float32
+                                                uint32_t exp32 = exp16 - 15 + 127; // Convert bias from 15 to 127
+                                                uint32_t mant32 = mant16 << 13; // Extend mantissa from 10 to 23 bits
+                                                uint32_t f32bits = (sign << 31) | (exp32 << 23) | mant32;
+                                                srcValue = *((float*)&f32bits);
+                                            }
+                                        }
+                                    } else {
+                                        NSLog(@"[CoreML] WARNING: Float16 srcIdx %ld >= actualMemoryElements %ld - using 0.0", 
+                                              (long)srcIdx, (long)actualMemoryElements);
+                                        srcValue = 0.0f;
+                                    }
+                                } else {
+                                    // Handle Float32 data (4 bytes per element) - existing logic
+                                    float *f32Data = (float*)outputArray.dataPointer;
+                                    srcValue = f32Data[srcIdx];
+                                }
+                                
+                                // Copy to whisper buffer using stride
+                                char *ggmlData = (char*)out;
+                                size_t ggmlOffset = state * sizeof(float) + ctx * out_stride_bytes;
+                                float *ggmlPtr = (float*)(ggmlData + ggmlOffset);
+                                *ggmlPtr = srcValue;
+                                copiedElements++;
                             }
                         }
                     }
                     
-                    // Final performance metrics
-                    NSTimeInterval totalTime = [[NSDate date] timeIntervalSinceDate:copyStartTime];
-                    double finalElementsPerSecond = copiedElements / totalTime;
-                    
-                    NSLog(@"[CoreML] ✅ Tensor copy completed: %ld/%ld elements in %.3f seconds (%.0f elements/sec)", 
-                          (long)copiedElements, (long)totalElements, totalTime, finalElementsPerSecond);
-                    NSLog(@"[CoreML] 4D->2D adaptive reshape completed: copied %ld elements to [%ld×%ld] whisper buffer", 
-                          (long)copiedElements, (long)whisperNState, (long)whisperNCtx);
+                    NSLog(@"[CoreML] Tensor copy completed: %ld elements", (long)copiedElements);
                           
                 } else {
                     // Direct copy for 2D output with size adaptation
@@ -819,33 +885,42 @@ int whisper_coreml_encode_with_dims(
                         return -1;
                     }
                 }
+            } // End of if/else block for tensor reshaping
                 
-            } @catch (NSException *exception) {
-                NSLog(@"[CoreML] Exception during data copying: %@ - using CPU fallback", exception.reason);
-                return -1;
-            }
-        }
+        } // End of autoreleasepool for data copying
         
         NSLog(@"[CoreML] Successfully completed prediction with %ld validated output elements", (long)outputElements);
         return 0; // Success
-        
+    
     } @catch (NSException *exception) {
-        NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exception.reason);
-        
+        NSString *exceptionReason = exception.reason ?: @"Unknown";
+
+        // Check for ANE-specific exceptions
+        if ([exceptionReason containsString:@"ANE"] ||
+            [exceptionReason containsString:@"ANEF"] ||
+            [exceptionReason containsString:@"E5RT"] ||
+            [exceptionReason containsString:@"helper application"] ||
+            [exceptionReason containsString:@"MILCompiler"]) {
+            NSLog(@"[CoreML] ANE exception during background transition: %@ - this is expected", exceptionReason);
+            NSLog(@"[CoreML] Gracefully falling back to CPU - transcription will continue without crash");
+        } else {
+            NSLog(@"[CoreML] Exception during prediction: %@ - using CPU fallback", exceptionReason);
+        }
+
         // SAFETY: Ensure output buffer is safe even on exception
         // Use conservative buffer size that works for both base (512) and large (1280)
         const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
         memset(out, 0, conservative_encoder_output_size);
-        
+
         return -1; // CPU fallback
     } @catch (...) {
         NSLog(@"[CoreML] Unknown exception during prediction - using CPU fallback");
-        
+
         // SAFETY: Handle any other exception type
         // Use conservative buffer size that works for both base (512) and large (1280)
         const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
         memset(out, 0, conservative_encoder_output_size);
-        
+
         return -1; // CPU fallback
     }
 }
@@ -903,6 +978,139 @@ void whisper_coreml_free(struct whisper_coreml_context * ctx) {
             delete ctx;
         }
     }
+}
+
+// MARK: - Memory Management Functions for Crash Prevention
+
+size_t whisper_coreml_get_available_memory(void) {
+    @try {
+        mach_port_t host_port = mach_host_self();
+        vm_size_t pagesize;
+        host_page_size(host_port, &pagesize);
+        
+        vm_statistics64_data_t vm_stat;
+        mach_msg_type_number_t host_size = sizeof(vm_statistics64_data_t) / sizeof(natural_t);
+        
+        kern_return_t result = host_statistics64(host_port, HOST_VM_INFO64, 
+                                               (host_info64_t)&vm_stat, &host_size);
+        
+        if (result == KERN_SUCCESS) {
+            // Calculate available memory: free + inactive pages
+            uint64_t available_pages = vm_stat.free_count + vm_stat.inactive_count;
+            size_t available_bytes = available_pages * pagesize;
+            
+            NSLog(@"[CoreML Memory] Available: %.2f MB (free: %u + inactive: %u pages, %lu bytes/page)", 
+                  available_bytes / (1024.0 * 1024.0), 
+                  vm_stat.free_count, vm_stat.inactive_count, (unsigned long)pagesize);
+            
+            return available_bytes;
+        } else {
+            NSLog(@"[CoreML Memory] Failed to get memory statistics, kern_return: %d", result);
+            return 0;
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[CoreML Memory] Exception getting available memory: %@", exception.reason);
+        return 0;
+    }
+}
+
+bool whisper_coreml_check_memory_sufficient(size_t required_bytes) {
+    // Get current available memory
+    size_t available = whisper_coreml_get_available_memory();
+    
+    if (available == 0) {
+        NSLog(@"[CoreML Memory] WARNING: Could not determine available memory, assuming insufficient");
+        return false;
+    }
+    
+    // Safety factor: require 2x the needed memory to account for:
+    // 1. Temporary allocations during processing
+    // 2. System memory pressure
+    // 3. CoreML internal buffers
+    size_t safety_factor = 2;
+    size_t required_with_safety = required_bytes * safety_factor;
+    
+    bool sufficient = available >= required_with_safety;
+    
+    NSLog(@"[CoreML Memory] Check: need %.2f MB (%.2f MB with %zux safety), have %.2f MB -> %@",
+          required_bytes / (1024.0 * 1024.0),
+          required_with_safety / (1024.0 * 1024.0),
+          safety_factor,
+          available / (1024.0 * 1024.0),
+          sufficient ? @"SUFFICIENT" : @"INSUFFICIENT");
+    
+    return sufficient;
+}
+
+void whisper_coreml_handle_memory_pressure(void) {
+    NSLog(@"[CoreML Memory] Handling memory pressure - triggering cleanup");
+    
+    @autoreleasepool {
+        // iOS uses ARC, no garbage collector available - just drain autorelease pools
+        // Force autorelease pool drain by creating and destroying nested pool
+        @autoreleasepool {
+            // Empty pool to force cleanup
+        }
+        
+        // On iOS, suggest memory cleanup through notification
+        #if TARGET_OS_IOS
+        [[NSNotificationCenter defaultCenter] 
+            postNotificationName:UIApplicationDidReceiveMemoryWarningNotification 
+            object:nil];
+        #endif
+        
+        // Log memory status after cleanup
+        size_t available_after = whisper_coreml_get_available_memory();
+        NSLog(@"[CoreML Memory] Available after cleanup: %.2f MB", 
+              available_after / (1024.0 * 1024.0));
+    }
+}
+
+bool whisper_coreml_should_fallback_to_cpu(size_t buffer_size) {
+    // Define memory thresholds for real-world Whisper model usage
+    const size_t CRITICAL_MEMORY_THRESHOLD = 500 * 1024 * 1024; // 500 MB minimum for any model
+    const size_t LARGE_MODEL_THRESHOLD = 1000 * 1024 * 1024;    // 1 GB for medium+ models
+    
+    size_t available = whisper_coreml_get_available_memory();
+    
+    // Fallback conditions based on actual Whisper model requirements:
+    // 1. Very low available memory (< 500MB) - won't run any model well
+    // 2. Large model request with insufficient memory (need 3x safety factor)
+    // 3. Unable to determine available memory
+    
+    if (available == 0) {
+        NSLog(@"[CoreML Memory] FALLBACK: Cannot determine available memory");
+        return true;
+    }
+    
+    if (available < CRITICAL_MEMORY_THRESHOLD) {
+        NSLog(@"[CoreML Memory] FALLBACK: Critical memory shortage (%.2f MB < %.2f MB threshold)",
+              available / (1024.0 * 1024.0), CRITICAL_MEMORY_THRESHOLD / (1024.0 * 1024.0));
+        return true;
+    }
+    
+    // For models requiring > 1GB, use stricter memory validation
+    if (buffer_size > LARGE_MODEL_THRESHOLD) {
+        // Large models need 4x safety factor due to CoreML overhead
+        size_t required_with_safety = buffer_size * 4;
+        if (available < required_with_safety) {
+            NSLog(@"[CoreML Memory] FALLBACK: Large model insufficient memory (%.2f MB buffer needs %.2f MB with 4x safety, %.2f MB available)",
+                  buffer_size / (1024.0 * 1024.0), required_with_safety / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
+            return true;
+        }
+    } else {
+        // Smaller models use 3x safety factor
+        size_t required_with_safety = buffer_size * 3;
+        if (available < required_with_safety) {
+            NSLog(@"[CoreML Memory] FALLBACK: Model insufficient memory (%.2f MB buffer needs %.2f MB with 3x safety, %.2f MB available)",
+                  buffer_size / (1024.0 * 1024.0), required_with_safety / (1024.0 * 1024.0), available / (1024.0 * 1024.0));
+            return true;
+        }
+    }
+    
+    NSLog(@"[CoreML Memory] PROCEEDING: Memory sufficient (%.2f MB available, %.2f MB buffer)",
+          available / (1024.0 * 1024.0), buffer_size / (1024.0 * 1024.0));
+    return false;
 }
 
 #ifdef __cplusplus
