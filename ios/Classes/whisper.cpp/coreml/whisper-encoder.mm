@@ -808,7 +808,10 @@ int whisper_coreml_encode_with_dims(
                             }
                             
                             // Bounds checking with data type awareness
-                            if (srcIdx >= 0 && srcIdx < outputElements) {
+                            // srcIdx is computed from padded strides, so bound it by the
+                            // physical (padded) memory size, not the logical element count -
+                            // otherwise the last state rows are silently skipped
+                            if (srcIdx >= 0 && srcIdx < actualMemoryElements) {
                                 float srcValue = 0.0f;
                                 
                                 // Extract value from CoreML output based on data type
@@ -908,18 +911,18 @@ int whisper_coreml_encode_with_dims(
         }
 
         // SAFETY: Ensure output buffer is safe even on exception
-        // Use conservative buffer size that works for both base (512) and large (1280)
-        const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
-        memset(out, 0, conservative_encoder_output_size);
+        // Only clear the caller's actual buffer - writing more than
+        // out_n_state * out_n_ctx floats corrupts the heap for smaller models
+        memset(out, 0, out_n_state * out_n_ctx * sizeof(float));
 
         return -1; // CPU fallback
     } @catch (...) {
         NSLog(@"[CoreML] Unknown exception during prediction - using CPU fallback");
 
         // SAFETY: Handle any other exception type
-        // Use conservative buffer size that works for both base (512) and large (1280)
-        const size_t conservative_encoder_output_size = 1500 * 1280 * sizeof(float); // Max size for large model
-        memset(out, 0, conservative_encoder_output_size);
+        // Only clear the caller's actual buffer - writing more than
+        // out_n_state * out_n_ctx floats corrupts the heap for smaller models
+        memset(out, 0, out_n_state * out_n_ctx * sizeof(float));
 
         return -1; // CPU fallback
     }
