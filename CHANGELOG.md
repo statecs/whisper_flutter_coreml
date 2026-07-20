@@ -17,6 +17,7 @@
 
 * Fix heap corruption on iOS: CoreML encoder exception handlers cleared a hardcoded 7.68MB (large-model size) instead of the actual output buffer, overrunning smaller models' buffers and causing delayed EXC_BAD_ACCESS crashes
 * Fix silently dropped encoder output on iOS: copy-loop bounds check used the logical element count instead of the stride-padded physical size, zeroing the last encoder-state rows on every CoreML batch
+* Update Android build to NDK 28.0.12433566 and compileSdk 36 (16 KB page-size alignment required by Google Play for targetSdk 35+)
 
 ## 1.0.2
 

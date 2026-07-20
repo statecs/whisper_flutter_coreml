@@ -36,9 +36,9 @@ android {
     if (project.android.hasProperty("namespace")) {
         namespace "com.devac.whisper_flutter_coreml"
     }
-    ndkVersion "26.1.10909125"
+    ndkVersion "28.0.12433566"
 
-    compileSdk 34
+    compileSdk 36
 
     // Invoke the shared CMake build with the Android Gradle Plugin.
     externalNativeBuild {
