@@ -105,6 +105,22 @@ class VersionRequest with _$VersionRequest implements WhisperRequestDto {
   }
 }
 
+/// Frees the natively cached whisper context (model weights + CoreML
+/// encoder). Plain class (not freezed) — no fields, no codegen needed.
+class ReleaseContextRequest implements WhisperRequestDto {
+  const ReleaseContextRequest();
+
+  @override
+  String get specialType => "releaseContext";
+
+  @override
+  String toRequestString() {
+    return json.encode({
+      "@type": specialType,
+    });
+  }
+}
+
 @freezed
 class MemoryCheckRequest with _$MemoryCheckRequest implements WhisperRequestDto {
   const factory MemoryCheckRequest() = _MemoryCheckRequest;

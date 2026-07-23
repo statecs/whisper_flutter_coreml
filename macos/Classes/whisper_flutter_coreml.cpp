@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <mutex>
 #include <vector>
 #include <cmath>
 #include <iostream>
@@ -14,6 +15,13 @@
 #include "json/json.hpp"
 
 using json = nlohmann::json;
+
+// Model load (ggml weights + CoreML encoder) dominates short requests, so the
+// context is kept alive across calls and reloaded only when the model changes.
+// Freed on demand via the "releaseContext" request.
+static whisper_context *g_cached_ctx = nullptr;
+static std::string g_cached_model_path;
+static std::mutex g_ctx_mutex;
 
 char *jsonToChar(json jsonData) noexcept
 {
@@ -101,8 +109,26 @@ json transcribe(json jsonBody) noexcept
         params.seed = time(NULL);
     }
 
-    // whisper init
-    struct whisper_context *ctx = whisper_init_from_file(params.model.c_str());
+    // whisper init (cached across requests; serialized by the mutex)
+    std::lock_guard<std::mutex> ctx_lock(g_ctx_mutex);
+    if (g_cached_ctx == nullptr || g_cached_model_path != params.model)
+    {
+        if (g_cached_ctx != nullptr)
+        {
+            whisper_free(g_cached_ctx);
+            g_cached_ctx = nullptr;
+        }
+        g_cached_ctx = whisper_init_from_file(params.model.c_str());
+        g_cached_model_path = params.model;
+    }
+    struct whisper_context *ctx = g_cached_ctx;
+    if (ctx == nullptr)
+    {
+        g_cached_model_path.clear();
+        jsonResult["@type"] = "error";
+        jsonResult["message"] = "failed to load whisper model: " + params.model;
+        return jsonResult;
+    }
     std::string text_result = "";
     const auto fname_inp = params.audio;
     // WAV input
@@ -253,8 +279,8 @@ json transcribe(json jsonBody) noexcept
         }
     }
     jsonResult["text"] = text_result;
-    
-    whisper_free(ctx);
+
+    // ctx stays cached for the next request (see g_cached_ctx)
     return jsonResult;
 }
 extern "C"
@@ -284,6 +310,19 @@ extern "C"
             {
                 jsonResult["@type"] = "version";
                 jsonResult["message"] = "lib version: v1.0.1";
+                return jsonToChar(jsonResult);
+            }
+            if (jsonBody["@type"] == "releaseContext")
+            {
+                std::lock_guard<std::mutex> ctx_lock(g_ctx_mutex);
+                if (g_cached_ctx != nullptr)
+                {
+                    whisper_free(g_cached_ctx);
+                    g_cached_ctx = nullptr;
+                    g_cached_model_path.clear();
+                }
+                jsonResult["@type"] = "releaseContext";
+                jsonResult["message"] = "released";
                 return jsonToChar(jsonResult);
             }
 
