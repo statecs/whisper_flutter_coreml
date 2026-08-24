@@ -400,7 +400,13 @@ struct whisper_vocab {
     id token_beg        = 50363; // begin timestamps
 
     bool is_multilingual() const {
-        return n_vocab == 51865;
+        // v2-family multilingual models have 51865 tokens; v3-family
+        // (large-v3, large-v3-turbo) add one language token -> 51866
+        return n_vocab >= 51865;
+    }
+
+    int num_languages() const {
+        return n_vocab - 51765 - (is_multilingual() ? 1 : 0);
     }
 };
 
@@ -995,13 +1001,17 @@ static bool whisper_model_load(struct whisper_model_loader * loader, whisper_con
         if (vocab.is_multilingual()) {
             vocab.token_eot++;
             vocab.token_sot++;
-            vocab.token_translate++;
-            vocab.token_transcribe++;
-            vocab.token_solm++;
-            vocab.token_prev++;
-            vocab.token_nosp++;
-            vocab.token_not++;
-            vocab.token_beg++;
+
+            // tokens after the language tokens shift by the number of extra
+            // languages: v2 has 99 (dt=1), v3-family has 100 (dt=2)
+            const int dt = vocab.num_languages() - 98;
+            vocab.token_translate  += dt;
+            vocab.token_transcribe += dt;
+            vocab.token_solm       += dt;
+            vocab.token_prev       += dt;
+            vocab.token_nosp       += dt;
+            vocab.token_not        += dt;
+            vocab.token_beg        += dt;
         }
 
         if (n_vocab < model.hparams.n_vocab) {
@@ -3145,7 +3155,8 @@ void whisper_free_params(struct whisper_full_params * params) {
 }
 
 int whisper_pcm_to_mel_with_state(struct whisper_context * ctx, struct whisper_state * state, const float * samples, int n_samples, int n_threads) {
-    if (!log_mel_spectrogram(*state, samples, n_samples, WHISPER_SAMPLE_RATE, WHISPER_N_FFT, WHISPER_HOP_LENGTH, WHISPER_N_MEL, n_threads, ctx->model.filters, false, state->mel)) {
+    // use the model's mel filter count (80 for v2-family, 128 for v3/turbo)
+    if (!log_mel_spectrogram(*state, samples, n_samples, WHISPER_SAMPLE_RATE, WHISPER_N_FFT, WHISPER_HOP_LENGTH, ctx->model.filters.n_mel, n_threads, ctx->model.filters, false, state->mel)) {
         log("%s: failed to compute mel spectrogram\n", __func__);
         return -1;
     }
@@ -3159,7 +3170,7 @@ int whisper_pcm_to_mel(struct whisper_context * ctx, const float * samples, int 
 
 // same as whisper_pcm_to_mel, but applies a Phase Vocoder to speed up the audio x2
 int whisper_pcm_to_mel_phase_vocoder_with_state(struct whisper_context * ctx, struct whisper_state * state, const float * samples, int n_samples, int n_threads) {
-    if (!log_mel_spectrogram(*state, samples, n_samples, WHISPER_SAMPLE_RATE, 2 * WHISPER_N_FFT, 2 * WHISPER_HOP_LENGTH, WHISPER_N_MEL, n_threads, ctx->model.filters, true, state->mel)) {
+    if (!log_mel_spectrogram(*state, samples, n_samples, WHISPER_SAMPLE_RATE, 2 * WHISPER_N_FFT, 2 * WHISPER_HOP_LENGTH, ctx->model.filters.n_mel, n_threads, ctx->model.filters, true, state->mel)) {
         log("%s: failed to compute mel spectrogram\n", __func__);
         return -1;
     }

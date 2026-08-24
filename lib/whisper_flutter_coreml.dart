@@ -226,6 +226,16 @@ class Whisper {
     return response.message;
   }
 
+  /// Free the natively cached whisper context (model weights + CoreML
+  /// encoder). Call when transcription is finished to reclaim memory; the
+  /// next transcribe() reloads the model automatically.
+  Future<void> releaseContext() async {
+    await _request(
+      whisperRequest: const ReleaseContextRequest(),
+      specificModel: WhisperModel.none,
+    );
+  }
+
   /// Check if CoreML model is available for hardware acceleration
   Future<bool> hasCoreMLSupport() async {
     if (!Platform.isIOS && !Platform.isMacOS) return false;

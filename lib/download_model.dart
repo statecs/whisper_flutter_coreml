@@ -43,6 +43,14 @@ enum WhisperModel {
   String getPath(String dir) {
     return "$dir/ggml-$modelName.bin";
   }
+
+  /// Name used for CoreML encoder artifacts. Quantization only applies to
+  /// the ggml weights, so any "-qX_Y" suffix is stripped — this mirrors
+  /// whisper.cpp's whisper_get_coreml_path_encoder() lookup.
+  String get coreMLModelName {
+    final match = RegExp(r'-q\d_\d$').firstMatch(modelName);
+    return match != null ? modelName.substring(0, match.start) : modelName;
+  }
   
   /// Check if this model can run with available memory (MB)
   /// [hasCoreML] indicates if CoreML hardware acceleration is available
@@ -67,7 +75,7 @@ enum WhisperModel {
   bool hasCoreMLModel(String modelDir) {
     if (this == WhisperModel.none) return false;
     
-    final coreMLPath = '$modelDir/ggml-$modelName-encoder.mlmodelc';
+    final coreMLPath = '$modelDir/ggml-$coreMLModelName-encoder.mlmodelc';
     final coreMLDir = Directory(coreMLPath);
     
     return coreMLDir.existsSync() && coreMLDir.listSync().isNotEmpty;
@@ -195,7 +203,7 @@ Future<void> _downloadCoreMLModel({
 }) async {
   if (model == WhisperModel.none) return;
 
-  final coreMLFileName = 'ggml-${model.modelName}-encoder.mlmodelc';
+  final coreMLFileName = 'ggml-${model.coreMLModelName}-encoder.mlmodelc';
   final coreMLDir = Directory('$destinationPath/$coreMLFileName');
   final downloadKey = '${model.modelName}@$destinationPath';
 
@@ -408,11 +416,11 @@ Future<void> _downloadCoreMLModel({
     Uri coreMLUri;
     if (downloadHost == null || downloadHost.isEmpty) {
       coreMLUri = Uri.parse(
-        'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model.modelName}-encoder.mlmodelc.zip',
+        'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-${model.coreMLModelName}-encoder.mlmodelc.zip',
       );
     } else {
       coreMLUri = Uri.parse(
-        '$downloadHost/ggml-${model.modelName}-encoder.mlmodelc.zip',
+        '$downloadHost/ggml-${model.coreMLModelName}-encoder.mlmodelc.zip',
       );
     }
     
