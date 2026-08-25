@@ -249,8 +249,11 @@ int whisper_coreml_encode_with_dims(
         
         // Calculate source data dimensions (whisper.cpp standard)
         const NSInteger srcNCtx = 1500; // Standard whisper context
-        const NSInteger srcNMels = 80;   // Standard mel features  
-        const NSInteger srcElements = 2 * srcNCtx * srcNMels; // 240,000 elements
+        // whisper.cpp computes the mel spectrogram with the model's filter count
+        // (80 for base/small/medium, 128 for v3-family), so the source always
+        // matches the model input and must be copied directly, not reshaped.
+        const NSInteger srcNMels = nMels;
+        const NSInteger srcElements = 2 * srcNCtx * srcNMels;
         
         NSLog(@"[CoreML] Source data: %ld elements (%ld ctx × %ld mels × 2)", 
               (long)srcElements, (long)srcNCtx, (long)srcNMels);
