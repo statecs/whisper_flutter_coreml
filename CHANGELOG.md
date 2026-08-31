@@ -1,3 +1,7 @@
+## 1.0.5
+
+* Fix SIGABRT when transcript text contains invalid UTF-8: whisper.cpp byte-level BPE tokens can split a multi-byte character across segment boundaries, and `json::dump()` throws on invalid UTF-8 inside the `noexcept` `jsonToChar`, aborting the whole app via `std::terminate()`. Now serializes with `error_handler_t::replace` (invalid bytes become U+FFFD) on iOS, macOS, and Android
+
 ## 1.0.4
 
 * Support Whisper v3-family models (`large-v3`, `large-v3-turbo`): the vendored whisper.cpp predated v3 and decoded these models into gibberish — `is_multilingual()` rejected the 51866-token v3 vocab (shifting every special token id), and the mel spectrogram was hardcoded to 80 bins while v3 encoders expect 128

@@ -17,7 +17,9 @@ using json = nlohmann::json;
 
 char *jsonToChar(json jsonData) noexcept
 {
-    std::string result = jsonData.dump();
+    // error_handler_t::replace: whisper.cpp segments can end mid multi-byte
+    // UTF-8 sequence; default dump() throws, which aborts via noexcept.
+    std::string result = jsonData.dump(-1, ' ', false, json::error_handler_t::replace);
     char *ch = new char[result.size() + 1];
     strcpy(ch, result.c_str());
     return ch;
